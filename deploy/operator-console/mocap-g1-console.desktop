@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Mocap G1 Operator Console
+Comment=Open the local mocap and robot status console
+Exec=xdg-open http://127.0.0.1:8766/
+Icon=applications-engineering
+Terminal=false
+StartupNotify=true
+Categories=Utility;Engineering;

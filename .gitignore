@@ -1,0 +1,36 @@
+__pycache__/
+*.pyc
+tools/vendor/libstdcxx13/
+.venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+build/
+dist/
+operator_ui/node_modules/
+artifacts/
+.operator-data/
+.lavish/
+*.egg-info/
+
+
+# Local scratch, per-machine agent settings, secrets, and large capture/recording
+# formats. (No tracked file matches these patterns as of this change.)
+tmp/
+.env
+*.npz
+*.pkl
+*.bvh
+*.mvnx
+*.bag
+coverage.xml
+.coverage
+# Local editor/agent configuration stays on each machine.
+.agents/
+.claude/
+.impeccable/
+skills-lock.json
+/session.env

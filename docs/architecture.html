@@ -1,0 +1,620 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex,nofollow">
+  <title>mocap_humanoid — architecture map</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0a0d12;
+      --panel: rgba(16, 21, 29, .93);
+      --panel-solid: #10151d;
+      --panel-2: #151c26;
+      --text: #eef3f8;
+      --muted: #93a0af;
+      --faint: #5f6b79;
+      --line: #26303c;
+      --grid: #1a222c;
+      --accent: #f4c45e;
+      --danger: #ff806f;
+      --ok: #65d5aa;
+      --shadow: 0 24px 70px rgba(0, 0, 0, .4);
+    }
+    html[data-theme="light"] {
+      color-scheme: light;
+      --bg: #edf1f4;
+      --panel: rgba(250, 252, 253, .94);
+      --panel-solid: #fafcfd;
+      --panel-2: #f1f4f6;
+      --text: #15202b;
+      --muted: #536170;
+      --faint: #7b8894;
+      --line: #cfd7df;
+      --grid: #dce3e9;
+      --accent: #99670a;
+      --danger: #bb382a;
+      --ok: #087b58;
+      --shadow: 0 24px 70px rgba(27, 44, 60, .18);
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; }
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      font-size: 14px;
+    }
+    button, input { font: inherit; }
+    button { color: inherit; }
+    .app { height: 100%; display: grid; grid-template-rows: 72px minmax(0, 1fr); }
+    header {
+      position: relative;
+      z-index: 30;
+      display: flex;
+      align-items: center;
+      gap: 20px;
+      padding: 0 22px;
+      border-bottom: 1px solid var(--line);
+      background: var(--panel-solid);
+    }
+    .brand { min-width: 280px; }
+    .eyebrow { color: var(--accent); font: 700 10px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .16em; text-transform: uppercase; }
+    h1 { margin: 4px 0 0; font-size: 17px; font-weight: 650; letter-spacing: -.02em; }
+    .metrics { display: flex; align-items: center; gap: 8px; margin-left: auto; }
+    .metric { min-width: 90px; padding: 8px 11px; border: 1px solid var(--line); border-radius: 9px; background: var(--panel-2); }
+    .metric b { display: block; font: 700 14px/1 ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .metric span { display: block; margin-top: 4px; color: var(--muted); font-size: 10px; letter-spacing: .04em; }
+    .metric.coverage b { color: var(--ok); }
+    .icon-btn, .tool-btn {
+      border: 1px solid var(--line);
+      background: var(--panel-2);
+      border-radius: 9px;
+      cursor: pointer;
+      transition: border-color .18s, transform .18s, background .18s;
+    }
+    .icon-btn { width: 38px; height: 38px; }
+    .icon-btn:hover, .tool-btn:hover { border-color: var(--faint); transform: translateY(-1px); }
+    .workspace { min-height: 0; display: grid; grid-template-columns: 300px minmax(0, 1fr); }
+    aside {
+      position: relative;
+      z-index: 20;
+      min-height: 0;
+      overflow: auto;
+      padding: 20px 18px 30px;
+      border-right: 1px solid var(--line);
+      background: var(--panel-solid);
+    }
+    .intro { margin: 0 0 18px; color: var(--muted); font-size: 12px; line-height: 1.55; }
+    .search {
+      width: 100%;
+      margin-bottom: 22px;
+      padding: 10px 11px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      outline: none;
+      color: var(--text);
+      background: var(--panel-2);
+    }
+    .search:focus { border-color: var(--accent); }
+    .section-title { margin: 20px 0 9px; color: var(--faint); font: 700 10px/1 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .14em; text-transform: uppercase; }
+    .flow-list { display: grid; gap: 7px; }
+    .flow {
+      position: relative;
+      width: 100%;
+      display: grid;
+      grid-template-columns: 28px 1fr;
+      gap: 9px;
+      align-items: center;
+      padding: 10px;
+      border: 1px solid var(--line);
+      border-radius: 9px;
+      text-align: left;
+      background: transparent;
+      cursor: pointer;
+    }
+    .flow:hover { background: var(--panel-2); }
+    .flow.active { border-color: color-mix(in srgb, var(--flow-color) 65%, var(--line)); background: color-mix(in srgb, var(--flow-color) 11%, transparent); }
+    .flow-num { color: var(--flow-color); font: 700 11px/1 ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .flow strong { display: block; font-size: 12px; }
+    .flow small { display: block; margin-top: 3px; color: var(--muted); font-size: 10px; }
+    .legend { display: grid; gap: 8px; }
+    .legend-row { display: grid; grid-template-columns: 9px 1fr auto; align-items: center; gap: 9px; color: var(--muted); font-size: 11px; }
+    .swatch { width: 8px; height: 8px; border-radius: 2px; background: var(--c); box-shadow: 0 0 12px color-mix(in srgb, var(--c) 55%, transparent); }
+    .legend-row b { color: var(--text); font-weight: 550; }
+    .guardrail { padding: 12px; border: 1px solid color-mix(in srgb, var(--danger) 40%, var(--line)); border-radius: 10px; background: color-mix(in srgb, var(--danger) 7%, transparent); }
+    .guardrail strong { color: var(--danger); font-size: 11px; }
+    .guardrail p { margin: 6px 0 0; color: var(--muted); font-size: 11px; line-height: 1.45; }
+    main { position: relative; min-width: 0; min-height: 0; overflow: hidden; background: var(--bg); }
+    main::before {
+      content: "";
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+      background: radial-gradient(circle at 52% 35%, color-mix(in srgb, var(--accent) 6%, transparent), transparent 43%);
+    }
+    #map { width: 100%; height: 100%; display: block; touch-action: none; user-select: none; }
+    .map-tools { position: absolute; z-index: 10; top: 16px; right: 16px; display: flex; gap: 6px; }
+    .tool-btn { min-width: 34px; height: 34px; padding: 0 10px; background: var(--panel); box-shadow: 0 5px 18px rgba(0,0,0,.12); }
+    .flow-caption {
+      position: absolute;
+      z-index: 8;
+      left: 18px;
+      bottom: 18px;
+      max-width: 590px;
+      padding: 12px 15px;
+      border: 1px solid var(--line);
+      border-left: 3px solid var(--flow-color, var(--accent));
+      border-radius: 9px;
+      background: var(--panel);
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(12px);
+    }
+    .flow-caption b { font-size: 12px; }
+    .flow-caption span { margin-left: 7px; color: var(--muted); font-size: 11px; }
+    .inspector {
+      position: absolute;
+      z-index: 25;
+      top: 0;
+      right: 0;
+      width: min(390px, 92vw);
+      height: 100%;
+      overflow: auto;
+      padding: 24px 22px 38px;
+      border-left: 1px solid var(--line);
+      background: var(--panel);
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(16px);
+      transform: translateX(105%);
+      transition: transform .25s ease;
+    }
+    .inspector.open { transform: translateX(0); }
+    .close { float: right; }
+    .node-code { display: inline-flex; padding: 5px 7px; border-radius: 6px; color: var(--node-color); background: color-mix(in srgb, var(--node-color) 13%, transparent); font: 800 11px/1 ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .inspector h2 { margin: 16px 0 4px; font-size: 25px; line-height: 1.08; letter-spacing: -.035em; }
+    .role { color: var(--node-color); font-size: 12px; }
+    .node-stats { display: flex; gap: 8px; margin: 18px 0; }
+    .node-stat { flex: 1; padding: 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel-2); }
+    .node-stat b { display: block; font: 700 14px/1 ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .node-stat span { color: var(--muted); font-size: 9px; text-transform: uppercase; letter-spacing: .08em; }
+    .inspector h3 { margin: 20px 0 7px; color: var(--faint); font: 700 10px/1 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .12em; text-transform: uppercase; }
+    .inspector p { margin: 0; color: var(--muted); line-height: 1.58; }
+    .file-list { display: grid; gap: 6px; }
+    .file { padding: 7px 8px; border: 1px solid var(--line); border-radius: 6px; overflow-wrap: anywhere; color: var(--text); background: var(--panel-2); font: 10px/1.35 ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .chips { display: flex; flex-wrap: wrap; gap: 6px; }
+    .chip { padding: 5px 7px; border: 1px solid var(--line); border-radius: 999px; color: var(--muted); font-size: 10px; }
+    .lot { opacity: .7; }
+    .lot-label { fill: var(--muted); font: 700 10px ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .13em; text-transform: uppercase; }
+    .edge { fill: none; stroke: var(--faint); stroke-width: 1.2; opacity: .22; vector-effect: non-scaling-stroke; transition: opacity .18s, stroke .18s, stroke-width .18s; }
+    .edge.support { stroke-dasharray: 4 5; opacity: .14; }
+    .edge.active { stroke: var(--flow-color); stroke-width: 2.7; opacity: .92; stroke-dasharray: 8 5; animation: march .55s linear infinite; }
+    @keyframes march { to { stroke-dashoffset: -13; } }
+    .building { cursor: pointer; transition: opacity .18s; }
+    .building.dim { opacity: .12; }
+    .building .top, .building .left, .building .right { stroke: color-mix(in srgb, var(--building-color) 55%, #000); stroke-width: 1; vector-effect: non-scaling-stroke; transition: filter .18s, opacity .18s; }
+    .building .top { fill: color-mix(in srgb, var(--building-color) 80%, white); }
+    .building .left { fill: color-mix(in srgb, var(--building-color) 55%, #151922); }
+    .building .right { fill: color-mix(in srgb, var(--building-color) 38%, #11151b); }
+    html[data-theme="light"] .building .left { fill: color-mix(in srgb, var(--building-color) 61%, #75808a); }
+    html[data-theme="light"] .building .right { fill: color-mix(in srgb, var(--building-color) 45%, #66717a); }
+    .building:hover .top, .building.selected .top, .building.flow-node .top { filter: brightness(1.28) drop-shadow(0 0 8px color-mix(in srgb, var(--building-color) 65%, transparent)); }
+    .building-label { fill: #0b1015; pointer-events: none; text-anchor: middle; font: 900 9px ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .06em; }
+    .building-name { fill: var(--text); paint-order: stroke; stroke: var(--bg); stroke-width: 4px; stroke-linejoin: round; pointer-events: none; text-anchor: middle; font: 600 9px ui-sans-serif, system-ui, sans-serif; }
+    .flow-dot { fill: var(--flow-color); filter: drop-shadow(0 0 5px var(--flow-color)); }
+    .external text { fill: var(--muted); text-anchor: middle; font: 700 9px ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .08em; }
+    .external rect { fill: var(--panel-2); stroke: var(--faint); stroke-dasharray: 5 4; }
+    .mobile-menu { display: none; }
+    @media (max-width: 950px) {
+      .workspace { grid-template-columns: 244px minmax(0,1fr); }
+      aside { padding-inline: 14px; }
+      .metric:nth-child(2) { display: none; }
+    }
+    @media (max-width: 720px) {
+      .app { grid-template-rows: 62px minmax(0,1fr); }
+      header { padding: 0 12px; gap: 8px; }
+      .brand { min-width: 0; flex: 1; }
+      h1 { font-size: 14px; }
+      .eyebrow, .metrics { display: none; }
+      .mobile-menu { display: block; }
+      .workspace { display: block; }
+      aside { position: absolute; inset: 62px auto 0 0; width: min(300px, 88vw); transform: translateX(-103%); transition: transform .22s; box-shadow: var(--shadow); }
+      aside.open { transform: translateX(0); }
+      main { width: 100%; height: 100%; }
+      .flow-caption { right: 12px; left: 12px; bottom: 12px; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { animation-duration: .001ms !important; animation-iteration-count: 1 !important; scroll-behavior: auto !important; }
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <header>
+      <button class="icon-btn mobile-menu" id="menuBtn" aria-label="Open map controls">☰</button>
+      <div class="brand">
+        <div class="eyebrow">Repository observatory</div>
+        <h1>mocap_humanoid / architecture</h1>
+      </div>
+      <div class="metrics" aria-label="Measured source coverage">
+        <div class="metric"><b>25</b><span>subsystems</span></div>
+        <div class="metric"><b>21,034</b><span>Python LOC</span></div>
+        <div class="metric coverage"><b>64 / 64</b><span>sources mapped</span></div>
+      </div>
+      <button class="icon-btn" id="themeBtn" aria-label="Toggle light and dark theme">◐</button>
+    </header>
+    <div class="workspace">
+      <aside id="sidebar">
+        <p class="intro">A measured map of the Xsens → GMR → Unitree G1 toolchain. Building height follows source weight; paths and flows are traced from code.</p>
+        <input class="search" id="search" type="search" placeholder="Find a subsystem or file…" aria-label="Find a subsystem or file">
+        <div class="section-title">Trace a payload</div>
+        <div class="flow-list" id="flowList"></div>
+        <div class="section-title">Neighborhoods</div>
+        <div class="legend" id="legend"></div>
+        <div class="section-title">Control boundary</div>
+        <div class="guardrail">
+          <strong>Simulation is not motor authority.</strong>
+          <p>Live GMR ends in MuJoCo. The arm bridge is a separate recorded-reference seam; its real DDS backend remains explicitly unverified on hardware.</p>
+        </div>
+      </aside>
+      <main>
+        <svg id="map" role="img" aria-label="Interactive isometric architecture map" viewBox="0 0 1600 980">
+          <defs>
+            <pattern id="grid" width="54" height="27" patternUnits="userSpaceOnUse" patternTransform="translate(10 5)">
+              <path d="M27 0 54 13.5 27 27 0 13.5Z" fill="none" stroke="var(--grid)" stroke-width="1"/>
+            </pattern>
+            <filter id="softShadow" x="-60%" y="-60%" width="220%" height="240%">
+              <feDropShadow dx="0" dy="8" stdDeviation="8" flood-opacity=".24"/>
+            </filter>
+          </defs>
+          <rect width="1600" height="980" fill="url(#grid)" opacity=".7"/>
+          <g id="camera">
+            <g id="lots"></g>
+            <g id="edges"></g>
+            <g id="externals"></g>
+            <g id="buildings"></g>
+            <g id="flowDots"></g>
+          </g>
+        </svg>
+        <div class="map-tools" aria-label="Map controls">
+          <button class="tool-btn" id="zoomOut" aria-label="Zoom out">−</button>
+          <button class="tool-btn" id="resetView">Reset</button>
+          <button class="tool-btn" id="zoomIn" aria-label="Zoom in">+</button>
+        </div>
+        <div class="flow-caption" id="flowCaption"></div>
+        <section class="inspector" id="inspector" aria-live="polite"></section>
+      </main>
+    </div>
+  </div>
+  <script>
+    const groups = [
+      { id: 'contracts', name: 'Contracts & runtime', color: '#68a4ff' },
+      { id: 'live', name: 'Live Xsens ingest', color: '#48c9b0' },
+      { id: 'offline', name: 'Motion production', color: '#a98af5' },
+      { id: 'quality', name: 'Qualification', color: '#f2b45d' },
+      { id: 'control', name: 'Safe control seam', color: '#ef7467' },
+      { id: 'verify', name: 'Verification', color: '#7fc36a' }
+    ];
+
+    const nodes = [
+      { id:'schema', code:'SC', name:'G1 schema', role:'the shared 29-DOF contract', group:'contracts', x:1, y:1, count:2, loc:78,
+        what:'Defines the one joint order every recorded, simulated, evaluated, and commanded motion must share. It also isolates the 17 waist-and-arm joints used by the hardware seam.',
+        how:'Names, indices, and official URDF limits live together so downstream tools address joints by contract instead of silently trusting array positions.',
+        files:['mocap_g1/schema.py','mocap_g1/__init__.py','eval/assets/g1_29dof_official.urdf'], stack:['Python','URDF','NumPy'] },
+      { id:'bootstrap', code:'WS', name:'Pinned workspace', role:'the reproducible runtime boundary', group:'contracts', x:1, y:4, count:1, loc:237,
+        what:'Checks out and verifies the external GMR workspace, local patches, containers, and retarget configuration needed beyond this Python package.',
+        how:'Large robot assets and external engines stay outside the package; pinned commits and explicit patches make that separation reproducible.',
+        files:['tools/bootstrap_g1_workspace.py','pyproject.toml','retarget_configs/','docker/xsens-humanoid/'], stack:['setuptools','Docker','GMR'] },
+
+      { id:'codec', code:'MX', name:'MXTP codecs', role:'the wire-format gate', group:'live', x:4, y:0, count:2, loc:500,
+        what:'Decodes Xsens MXTP02 body poses and MXTP20 joint angles without vendor dependencies, and produces synthetic packets for loopback tests.',
+        how:'Strict binary parsing rejects malformed sizes and identifiers before packets can influence acceptance, replay, or retargeting.',
+        files:['mocap_g1/mxtp02.py','tools/mxtp02_replayer.py'], stack:['UDP','MXTP02','MXTP20'] },
+      { id:'accept', code:'AC', name:'Stream acceptance', role:'the day-one transport gate', group:'live', x:6, y:0, count:4, loc:1064,
+        what:'Grades sample rate, loss, ordering, body/joint pairing, quaternion norms, translation units, and malformed traffic before downstream use.',
+        how:'Acceptance is dependency-free and writes a machine-readable report so networking evidence is preserved rather than judged from a live console.',
+        files:['mocap_g1/xsens_stream.py','tools/xsens/stream_acceptance.py','tools/checks/decode_check.py','tools/profile_live_ingest.py'], stack:['UDP 5555','JSON','statistics'] },
+      { id:'receiver', code:'RX', name:'Newest-frame receiver', role:'the low-latency ingress', group:'live', x:4, y:2, count:1, loc:249,
+        what:'Filters packets by source, drains UDP bursts, keeps the newest valid body frame, and converts Xsens segment names into GMR input.',
+        how:'Backlog is discarded deliberately: freshness matters more than processing every historical frame in a teleoperation preview.',
+        files:['mocap_g1/xsens_live.py'], stack:['UDP','Xsens segments','quaternions'] },
+      { id:'filter', code:'FL', name:'Causal filtering', role:'the timing and smoothing stage', group:'live', x:6, y:2, count:1, loc:1110,
+        what:'Smooths retargeted motion, upsamples commands to a fixed rate, and records per-stage latency without introducing future-frame lookahead.',
+        how:'One Euro and critically damped filters are paired with explicit causal timing so live behavior is not confused with offline zero-phase conditioning.',
+        files:['mocap_g1/live_filter.py'], stack:['One Euro','250 Hz','latency probes'] },
+      { id:'live-safety', code:'LS', name:'Simulator safety', role:'the bounded preview envelope', group:'live', x:8, y:2, count:1, loc:226,
+        what:'Applies the stateful waist-and-arm envelope to a 29-DOF simulated pose while preserving fresh kinematic root and leg references.',
+        how:'It reuses the control safety core but makes no whole-body controller claim; this is a simulator guard, not standing-balance authority.',
+        files:['mocap_g1/live_safety.py'], stack:['NumPy','17 guarded joints','failsafe'] },
+      { id:'live-sim', code:'GV', name:'GMR live viewer', role:'the live simulation loop', group:'live', x:10, y:1, count:1, loc:594,
+        what:'Runs receiver → GMR retargeting → filtering → simulator safety → MuJoCo display for the latest Xsens body frame.',
+        how:'The direct GMR route stays outside ROS 2 for latency and stops at MuJoCo; it is intentionally not wired into the arm bridge.',
+        files:['tools/xsens/live_g1_sim.py','docker/gmr-live/run.sh','docker/gmr-live/Dockerfile'], stack:['GMR','MuJoCo','Docker'] },
+      { id:'operator', code:'OP', name:'Operator modes', role:'the single-listener switchboard', group:'live', x:8, y:0, count:0, loc:0,
+        what:'Runs acceptance, ROS 2 capture, or the GMR viewer as explicit sequential modes on the commissioned Xsens network.',
+        how:'Only one mode binds UDP 5555 at a time. ROS 2 and GMR are peers, not stages in one hidden pipeline.',
+        files:['tools/xsens/live_operator.sh','tools/xsens/check_xsens_lan.sh','tools/xsens/setup_xsens_dual_network.sh','docker/xsens-ros2/'], stack:['Bash','ROS 2 Jazzy','Docker'] },
+
+      { id:'retarget', code:'RT', name:'Retarget adapters', role:'the pinned GMR crossing', group:'offline', x:1, y:7, count:3, loc:250,
+        what:'Turns calibrated Xsens BVH and other supported motion formats into G1 trajectories through the pinned external GMR engine.',
+        how:'Thin adapters keep project validation and file contracts local while the heavy IK implementation remains in its versioned external checkout.',
+        files:['tools/retarget/retarget_headless.py','tools/retarget/retarget_patched.py','tools/retarget/retarget_xsens_headless.py'], stack:['GMR','Mink','MuJoCo'] },
+      { id:'bvh-loop', code:'BV', name:'BVH loop preview', role:'the offline replay surface', group:'offline', x:3, y:6, count:1, loc:697,
+        what:'Loops an exported Xsens BVH through the G1 retargeter for repeatable visual review without a live suit.',
+        how:'Replay uses the same embodiment assumptions as live preview while allowing deterministic inspection and video capture.',
+        files:['tools/xsens/loop_bvh_g1.py'], stack:['BVH','GMR','MuJoCo'] },
+      { id:'ground', code:'GR', name:'Grounding pass', role:'the root-height correction', group:'offline', x:1, y:9, count:1, loc:288,
+        what:'Applies the calibrated G1 ground offset and validates residual foot penetration after retargeting.',
+        how:'Grounding is a named post-process with independent checks, preventing a visual fix from being mistaken for retargeting quality.',
+        files:['tools/retarget/postprocess_grounding.py','retarget_configs/ground-offset-calibration.md'], stack:['NumPy','MuJoCo','calibration'] },
+      { id:'conditioning', code:'CD', name:'Motion conditioning', role:'the offline signal hardener', group:'offline', x:4, y:8, count:2, loc:790,
+        what:'Repairs isolated spikes, filters, resamples, caps derivatives, and time-scales a selected recording into a new NPZ.',
+        how:'It is explicitly offline and preserves the source; zero-phase filtering is never reused to claim live-system behavior.',
+        files:['mocap_g1/conditioning.py','tools/condition_g1_motion.py'], stack:['SciPy','PCHIP','SLERP'] },
+      { id:'converter', code:'PK', name:'NPZ → GMR PKL', role:'the schema bridge', group:'offline', x:6, y:8, count:1, loc:268,
+        what:'Converts canonical recorded G1 arrays into the exact PKL shape expected by the evaluation harness.',
+        how:'The bridge is intentionally faithful rather than corrective so evaluation receives the same motion that passed upstream checks.',
+        files:['tools/convert_npz_to_gmr_pkl.py'], stack:['NPZ','pickle','29-DOF'] },
+      { id:'dataset', code:'DS', name:'Dataset publisher', role:'the provenance gate', group:'offline', x:3, y:10, count:2, loc:466,
+        what:'Validates commissioned jobs, runs calibrated retargeting, emits named PKL/CSV outputs, scores every clip, and seals a hashed manifest.',
+        how:'Client jobs fail closed on ambiguous calibration, license, metadata, or scoring; the manifest appears only after the entire batch succeeds.',
+        files:['mocap_g1/dataset.py','tools/dataset/g1_dataset_pipeline.py','configs/g1_dataset_job.example.json'], stack:['JSON','SHA-256','CSV'] },
+
+      { id:'window-audit', code:'WA', name:'Window audit', role:'the immutable first gate', group:'quality', x:8, y:5, count:2, loc:721,
+        what:'Checks a source NPZ against official limits, derivatives, discontinuities, and fixed windows without modifying the recording.',
+        how:'The input is hashed before and after so a read-only audit proves it did not quietly repair its own evidence.',
+        files:['mocap_g1/window_audit.py','tools/xsens/audit_g1_recording.py'], stack:['NPZ','SHA-256','URDF limits'] },
+      { id:'collision', code:'CG', name:'Collision tools', role:'the geometry gate and projector', group:'quality', x:10, y:5, count:3, loc:1051,
+        what:'Scans full MuJoCo geometry for self-collisions and optionally projects a trajectory coherently toward a neutral pose.',
+        how:'Audit and correction are separate commands. The aggregate qualifier invokes the audit, never the optional projection.',
+        files:['mocap_g1/collision_gate.py','tools/control/audit_g1_self_collisions.py','tools/control/project_g1_self_collisions.py'], stack:['MuJoCo','trajectory projection','fail closed'] },
+      { id:'screens', code:'CS', name:'Control screens', role:'the simulator feasibility gate', group:'quality', x:12, y:6, count:4, loc:1762,
+        what:'Screens upper-body tracking, support margin, tilt, effort, torque saturation, and simulated position violations.',
+        how:'Each screen states its model boundary: fixed-base upper-body tracking is not evidence of standing balance.',
+        files:['mocap_g1/controller_screen.py','mocap_g1/balance_screen.py','tools/control/qualify_g1_upper_body.py','tools/control/screen_g1_balance.py'], stack:['MuJoCo','bounded PD','support polygon'] },
+      { id:'faults', code:'FR', name:'Fault replay', role:'the deterministic failure lab', group:'quality', x:12, y:8, count:2, loc:719,
+        what:'Replays loss, latency, reordering, stalls, disables, and control-loop gaps through the same safety envelope used by the bridge.',
+        how:'Deterministic schedules make stale-source and hard-timeout behavior executable evidence without pretending to model a real actuator plant.',
+        files:['mocap_g1/fault_replay.py','tools/control/replay_g1_faults.py'], stack:['deterministic replay','failsafe','JSON'] },
+      { id:'qualifier', code:'QL', name:'Qualification ledger', role:'the six-stage evidence orchestrator', group:'quality', x:9, y:8, count:1, loc:604,
+        what:'Runs audit, conditioning, collision scan, controller screen, PKL conversion, and gate-v2 scoring, then consolidates hashes and verdicts.',
+        how:'Existing CLIs are invoked as subprocesses so the ledger tests the same public boundaries operators use instead of reimplementing them.',
+        files:['tools/qualify_g1_recording.py','docs/qualify-pipeline-2026-08-16.md'], stack:['subprocess','JSON ledger','SHA-256'] },
+      { id:'metrics', code:'EV', name:'PHUMA metrics', role:'the motion-quality scorer', group:'quality', x:9, y:10, count:2, loc:2394,
+        what:'Scores joint feasibility, contacts, jerk, root motion, torque, collisions, and optional fidelity, then applies gate-v2 thresholds.',
+        how:'Evaluation lives outside the installed package and requires an explicit model, keeping regression scoring distinct from control safety.',
+        files:['eval/metrics.py','eval/score_motion.py'], stack:['MuJoCo','NumPy','gate v2'] },
+      { id:'checks', code:'IX', name:'Independent checks', role:'the anti-regression cross-checks', group:'quality', x:11, y:10, count:5, loc:703,
+        what:'Cross-checks decoding, grounding residuals, skating, gate-v2 behavior, and patched GMR results with deliberately separate calculations.',
+        how:'Independent scripts reduce the chance that a shared implementation error makes both production and verification agree incorrectly.',
+        files:['tools/checks/crosscheck.py','tools/checks/gate_v2_selftest.py','tools/checks/ground_offset_residual.py','tools/checks/nonskate_indep.py','tools/checks/validate_patched.py'], stack:['independent math','self-tests','regression'] },
+
+      { id:'safety', code:'SE', name:'Safety envelope', role:'the stateful command limiter', group:'control', x:12, y:1, count:1, loc:238,
+        what:'Bounds position, velocity, acceleration, staleness, enable state, and authority for named waist-and-arm targets.',
+        how:'State resets from measured encoders and derives velocity from positions actually emitted, so saturation cannot hide an unsafe derivative.',
+        files:['mocap_g1/safety.py'], stack:['17 joints','rate limits','timeouts'] },
+      { id:'arm-bridge', code:'AB', name:'Arm bridge', role:'the guarded hardware seam', group:'control', x:14, y:2, count:3, loc:1616,
+        what:'Consumes recorded 29-DOF references, requires fresh measured state, and publishes only waist/arm motor slots plus an authority weight.',
+        how:'Fake transport is the default. Real CycloneDDS requires explicit acknowledgement, CRC-stamped LowCmd, and remains unverified on hardware.',
+        files:['mocap_g1/arm_bridge.py','tools/control/g1_arm_bridge.py','tools/control/mock_g1_arm_bridge.py'], stack:['CycloneDDS','Unitree SDK2','CRC'] },
+
+      { id:'tests', code:'TS', name:'Executable tests', role:'the hardware-free verification mesh', group:'verify', x:7, y:12, count:18, loc:4409,
+        what:'Exercises wire codecs, safety, filtering, qualification, CLI boundaries, and fake transport without requiring a suit or physical robot.',
+        how:'Hardware-dependent cases self-skip when external MJCF assets are absent; the suite is broad evidence, not a claim that hardware has been tested.',
+        files:['tests/*.py','.github/workflows/hardware-free.yml','Makefile'], stack:['unittest','GitHub Actions','synthetic UDP'] }
+    ];
+
+    const edges = [
+      {id:'codec-accept', from:'codec', to:'accept', type:'call'},
+      {id:'codec-receiver', from:'codec', to:'receiver', type:'data'},
+      {id:'operator-accept', from:'operator', to:'accept', type:'call'},
+      {id:'operator-live', from:'operator', to:'live-sim', type:'call'},
+      {id:'receiver-filter', from:'receiver', to:'filter', type:'data'},
+      {id:'filter-ls', from:'filter', to:'live-safety', type:'data'},
+      {id:'ls-viewer', from:'live-safety', to:'live-sim', type:'data'},
+      {id:'schema-conditioning', from:'schema', to:'conditioning', type:'support'},
+      {id:'schema-dataset', from:'schema', to:'dataset', type:'support'},
+      {id:'schema-audit', from:'schema', to:'window-audit', type:'support'},
+      {id:'schema-collision', from:'schema', to:'collision', type:'support'},
+      {id:'schema-screens', from:'schema', to:'screens', type:'support'},
+      {id:'schema-safety', from:'schema', to:'safety', type:'support'},
+      {id:'schema-arm', from:'schema', to:'arm-bridge', type:'support'},
+      {id:'dataset-retarget', from:'dataset', to:'retarget', type:'call'},
+      {id:'retarget-dataset', from:'retarget', to:'dataset', type:'data'},
+      {id:'dataset-metrics', from:'dataset', to:'metrics', type:'call'},
+      {id:'qual-audit', from:'qualifier', to:'window-audit', type:'call'},
+      {id:'qual-conditioning', from:'qualifier', to:'conditioning', type:'call'},
+      {id:'conditioning-collision', from:'conditioning', to:'collision', type:'data'},
+      {id:'conditioning-screens', from:'conditioning', to:'screens', type:'data'},
+      {id:'conditioning-converter', from:'conditioning', to:'converter', type:'data'},
+      {id:'converter-metrics', from:'converter', to:'metrics', type:'data'},
+      {id:'metrics-qual', from:'metrics', to:'qualifier', type:'data'},
+      {id:'safety-faults', from:'safety', to:'faults', type:'call'},
+      {id:'conditioning-arm', from:'conditioning', to:'arm-bridge', type:'data'},
+      {id:'arm-safety-call', from:'arm-bridge', to:'safety', type:'call'},
+      {id:'safety-arm-return', from:'safety', to:'arm-bridge', type:'data'},
+      {id:'metrics-checks', from:'metrics', to:'checks', type:'support'},
+      {id:'metrics-ground', from:'metrics', to:'ground', type:'support'},
+      {id:'screens-collision', from:'screens', to:'collision', type:'support'}
+    ];
+
+    const flows = [
+      { id:'live', num:'01', name:'Live Xsens preview', payload:'latest body frame', color:'#48c9b0',
+        edges:['codec-receiver','receiver-filter','filter-ls','ls-viewer'],
+        text:'MXTP02 packet → newest-frame ingest → causal filtering → bounded waist/arms → MuJoCo viewer' },
+      { id:'dataset', num:'02', name:'Publish a dataset', payload:'commissioned BVH', color:'#a98af5',
+        edges:['dataset-retarget','retarget-dataset','dataset-metrics'],
+        text:'validated job → pinned GMR retarget → canonical PKL/CSV → scoring → hashed manifest' },
+      { id:'qualify', num:'03', name:'Qualify a recording', payload:'conditioned NPZ', color:'#f2b45d',
+        edges:['qual-audit','qual-conditioning','conditioning-collision','conditioning-screens','conditioning-converter','converter-metrics','metrics-qual'],
+        text:'raw audit → derivative NPZ → independent simulator gates → gate v2 → consolidated ledger' },
+      { id:'arm', num:'04', name:'Guarded arm replay', payload:'17 joint targets', color:'#ef7467',
+        edges:['conditioning-arm','arm-safety-call','safety-arm-return'],
+        text:'recorded qpos → measured-state arming → bounded targets → CRC-stamped fake or DDS transport' }
+    ];
+
+    const nodeById = Object.fromEntries(nodes.map(n => [n.id, n]));
+    const groupById = Object.fromEntries(groups.map(g => [g.id, g]));
+    const svgNS = 'http://www.w3.org/2000/svg';
+    const lotsEl = document.getElementById('lots');
+    const edgesEl = document.getElementById('edges');
+    const buildingsEl = document.getElementById('buildings');
+    const flowDotsEl = document.getElementById('flowDots');
+    const cameraEl = document.getElementById('camera');
+    let currentFlow = flows[0];
+    let selectedNode = null;
+    let view = { scale: 1, x: 0, y: 0 };
+
+    function el(tag, attrs = {}) {
+      const node = document.createElementNS(svgNS, tag);
+      for (const [key, value] of Object.entries(attrs)) node.setAttribute(key, value);
+      return node;
+    }
+    function project(x, y, z = 0) { return [735 + (x - y) * 54, 105 + (x + y) * 27 - z]; }
+    function center(n) { return project(n.x, n.y, Math.min(122, 28 + Math.sqrt(Math.max(1, n.loc)) * 1.55) * .42); }
+    function edgePath(edge) {
+      const [x1,y1] = center(nodeById[edge.from]);
+      const [x2,y2] = center(nodeById[edge.to]);
+      const bend = ((edge.id.length * 7) % 25) - 12;
+      return `M ${x1} ${y1} C ${x1 + (x2-x1)*.35 + bend} ${y1-18}, ${x1 + (x2-x1)*.65 - bend} ${y2-18}, ${x2} ${y2}`;
+    }
+
+    function renderLots() {
+      lotsEl.replaceChildren();
+      groups.forEach(group => {
+        const members = nodes.filter(n => n.group === group.id);
+        const xs = members.map(n => n.x), ys = members.map(n => n.y);
+        const minX = Math.min(...xs)-.8, maxX = Math.max(...xs)+.8;
+        const minY = Math.min(...ys)-.8, maxY = Math.max(...ys)+.8;
+        const pts = [project(minX,minY), project(maxX,minY), project(maxX,maxY), project(minX,maxY)];
+        const p = el('polygon', { points:pts.map(v=>v.join(',')).join(' '), fill:`color-mix(in srgb, ${group.color} 7%, transparent)`, stroke:`color-mix(in srgb, ${group.color} 32%, transparent)`, 'stroke-dasharray':'6 8', class:'lot' });
+        lotsEl.appendChild(p);
+        const labelPos = project(minX, minY, 0);
+        const text = el('text', { x:labelPos[0], y:labelPos[1]-10, class:'lot-label' });
+        text.textContent = group.name;
+        lotsEl.appendChild(text);
+      });
+    }
+
+    function renderEdges() {
+      edgesEl.replaceChildren();
+      edges.forEach(edge => {
+        const p = el('path', { id:`edge-${edge.id}`, d:edgePath(edge), class:`edge ${edge.type === 'support' ? 'support' : ''}`, 'data-edge':edge.id });
+        edgesEl.appendChild(p);
+      });
+    }
+
+    function renderBuildings() {
+      buildingsEl.replaceChildren();
+      [...nodes].sort((a,b)=>(a.x+a.y)-(b.x+b.y)).forEach(n => {
+        const group = groupById[n.group];
+        const [cx, cy] = project(n.x,n.y);
+        const height = Math.min(122, 28 + Math.sqrt(Math.max(1,n.loc))*1.55);
+        const w = 30 + Math.min(14, n.count * .75), d = 17 + Math.min(7, n.count*.32);
+        const top = [[cx,cy-height-d],[cx+w,cy-height],[cx,cy-height+d],[cx-w,cy-height]];
+        const left = [top[3],top[2],[cx,cy+d],[cx-w,cy]];
+        const right = [top[1],top[2],[cx,cy+d],[cx+w,cy]];
+        const g = el('g', { class:'building', 'data-node':n.id, tabindex:'0', role:'button', 'aria-label':`${n.name}, ${n.loc.toLocaleString()} lines`, style:`--building-color:${group.color}` });
+        g.appendChild(el('ellipse',{cx,cy:cy+8,rx:w*1.15,ry:d*.9,fill:'rgba(0,0,0,.2)',filter:'url(#softShadow)'}));
+        g.appendChild(el('polygon',{points:left.map(v=>v.join(',')).join(' '),class:'left'}));
+        g.appendChild(el('polygon',{points:right.map(v=>v.join(',')).join(' '),class:'right'}));
+        g.appendChild(el('polygon',{points:top.map(v=>v.join(',')).join(' '),class:'top'}));
+        const code = el('text',{x:cx,y:cy-height+3,class:'building-label'}); code.textContent=n.code; g.appendChild(code);
+        const name = el('text',{x:cx,y:cy+d+16,class:'building-name'}); name.textContent=n.name; g.appendChild(name);
+        g.addEventListener('click',()=>openInspector(n.id));
+        g.addEventListener('keydown',e=>{ if(e.key==='Enter'||e.key===' '){e.preventDefault();openInspector(n.id);} });
+        buildingsEl.appendChild(g);
+      });
+    }
+
+    function renderExternal() {
+      const holder = document.getElementById('externals'); holder.replaceChildren();
+      [
+        {x:3,y:-1.3,label:'WINDOWS XSENS'},
+        {x:12,y:-.4,label:'GMR + MUJOCO'},
+        {x:16,y:2,label:'UNITREE G1 / DDS'}
+      ].forEach(p => {
+        const [x,y]=project(p.x,p.y); const g=el('g',{class:'external'});
+        g.appendChild(el('rect',{x:x-58,y:y-15,width:116,height:30,rx:7}));
+        const t=el('text',{x,y:y+3}); t.textContent=p.label; g.appendChild(t); holder.appendChild(g);
+      });
+    }
+
+    function renderChrome() {
+      const flowList = document.getElementById('flowList');
+      flowList.innerHTML = flows.map(f=>`<button class="flow" data-flow="${f.id}" style="--flow-color:${f.color}"><span class="flow-num">${f.num}</span><span><strong>${f.name}</strong><small>${f.payload}</small></span></button>`).join('');
+      flowList.querySelectorAll('.flow').forEach(b=>b.addEventListener('click',()=>activateFlow(b.dataset.flow)));
+      document.getElementById('legend').innerHTML = groups.map(g=>`<div class="legend-row" style="--c:${g.color}"><span class="swatch"></span><b>${g.name}</b><span>${nodes.filter(n=>n.group===g.id).length}</span></div>`).join('');
+    }
+
+    function activateFlow(id) {
+      currentFlow = flows.find(f=>f.id===id) || flows[0];
+      document.documentElement.style.setProperty('--flow-color', currentFlow.color);
+      document.querySelectorAll('.flow').forEach(b=>b.classList.toggle('active',b.dataset.flow===currentFlow.id));
+      const active = new Set(currentFlow.edges);
+      const activeNodes = new Set();
+      edges.forEach(e=>{ if(active.has(e.id)){activeNodes.add(e.from);activeNodes.add(e.to);} });
+      document.querySelectorAll('.edge').forEach(p=>p.classList.toggle('active',active.has(p.dataset.edge)));
+      document.querySelectorAll('.building').forEach(g=>g.classList.toggle('flow-node',activeNodes.has(g.dataset.node)));
+      const caption=document.getElementById('flowCaption');
+      caption.style.setProperty('--flow-color',currentFlow.color);
+      caption.innerHTML=`<b>${currentFlow.name}</b><span>${currentFlow.text}</span>`;
+      flowDotsEl.replaceChildren();
+      currentFlow.edges.forEach((edgeId,i)=>{
+        const edge=edges.find(e=>e.id===edgeId); if(!edge)return;
+        const dot=el('circle',{r:'4.2',class:'flow-dot',style:`--flow-color:${currentFlow.color}`});
+        const motion=el('animateMotion',{dur:`${2.1+currentFlow.edges.length*.11}s`,begin:`-${i*.34}s`,repeatCount:'indefinite',path:edgePath(edge)});
+        dot.appendChild(motion); flowDotsEl.appendChild(dot);
+      });
+      document.getElementById('sidebar').classList.remove('open');
+    }
+
+    function openInspector(id) {
+      const n=nodeById[id], group=groupById[n.group]; selectedNode=id;
+      document.querySelectorAll('.building').forEach(g=>g.classList.toggle('selected',g.dataset.node===id));
+      const inspector=document.getElementById('inspector');
+      inspector.style.setProperty('--node-color',group.color);
+      inspector.innerHTML=`
+        <button class="icon-btn close" id="closeInspector" aria-label="Close details">×</button>
+        <span class="node-code">${n.code}</span>
+        <h2>${n.name}</h2><div class="role">${n.role}</div>
+        <div class="node-stats"><div class="node-stat"><b>${n.count}</b><span>Python files</span></div><div class="node-stat"><b>${n.loc.toLocaleString()}</b><span>Python LOC</span></div></div>
+        <h3>What it does</h3><p>${n.what}</p>
+        <h3>Why it is built this way</h3><p>${n.how}</p>
+        <h3>Representative paths</h3><div class="file-list">${n.files.map(f=>`<div class="file">${f}</div>`).join('')}</div>
+        <h3>Vocabulary</h3><div class="chips">${n.stack.map(s=>`<span class="chip">${s}</span>`).join('')}</div>`;
+      inspector.classList.add('open');
+      document.getElementById('closeInspector').addEventListener('click',closeInspector);
+    }
+    function closeInspector(){ selectedNode=null; document.getElementById('inspector').classList.remove('open'); document.querySelectorAll('.building').forEach(g=>g.classList.remove('selected')); }
+
+    function applyView(){ cameraEl.setAttribute('transform',`translate(${view.x} ${view.y}) scale(${view.scale})`); }
+    function zoom(delta){ view.scale=Math.max(.65,Math.min(1.6,view.scale+delta)); applyView(); }
+    document.getElementById('zoomIn').addEventListener('click',()=>zoom(.12));
+    document.getElementById('zoomOut').addEventListener('click',()=>zoom(-.12));
+    document.getElementById('resetView').addEventListener('click',()=>{view={scale:1,x:0,y:0};applyView();});
+
+    const map=document.getElementById('map'); let drag=null;
+    map.addEventListener('pointerdown',e=>{ if(e.target.closest('.building'))return; drag={x:e.clientX,y:e.clientY,ox:view.x,oy:view.y}; map.setPointerCapture(e.pointerId); });
+    map.addEventListener('pointermove',e=>{ if(!drag)return; view.x=drag.ox+(e.clientX-drag.x); view.y=drag.oy+(e.clientY-drag.y); applyView(); });
+    map.addEventListener('pointerup',()=>drag=null);
+    map.addEventListener('wheel',e=>{e.preventDefault();zoom(e.deltaY<0?.08:-.08);},{passive:false});
+
+    document.getElementById('search').addEventListener('input',e=>{
+      const q=e.target.value.trim().toLowerCase();
+      document.querySelectorAll('.building').forEach(g=>{
+        const n=nodeById[g.dataset.node]; const hay=[n.name,n.role,n.group,...n.files,...n.stack].join(' ').toLowerCase();
+        g.classList.toggle('dim',q && !hay.includes(q));
+      });
+    });
+    document.getElementById('themeBtn').addEventListener('click',()=>{
+      const next=document.documentElement.dataset.theme==='dark'?'light':'dark'; document.documentElement.dataset.theme=next; localStorage.setItem('architecture-theme',next);
+    });
+    document.getElementById('menuBtn').addEventListener('click',()=>document.getElementById('sidebar').classList.toggle('open'));
+    document.addEventListener('keydown',e=>{if(e.key==='Escape')closeInspector();});
+
+    const savedTheme=localStorage.getItem('architecture-theme'); if(savedTheme)document.documentElement.dataset.theme=savedTheme;
+    renderLots(); renderEdges(); renderExternal(); renderBuildings(); renderChrome(); activateFlow('live'); applyView();
+  </script>
+</body>
+</html>

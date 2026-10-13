@@ -1,0 +1,36 @@
+# Applies ON TOP of gmr-issue-180.patch (which makes offset_human_data_to_ground
+# use self.ground_offset instead of the hard-coded 0.1).
+# This patch (a) loads ground_offset from the per-robot IK config json and
+# (b) gates apply_ground_offset under offset_to_ground so a nonzero per-config
+# offset leaves offset_to_ground=False (ungrounded) runs untouched.
+# See ground-offset-calibration.md for how the per-robot values were derived.
+diff --git a/general_motion_retargeting/motion_retarget.py b/general_motion_retargeting/motion_retarget.py
+index b68bfdc..60913c2 100644
+--- a/general_motion_retargeting/motion_retarget.py
++++ b/general_motion_retargeting/motion_retarget.py
+@@ -102,7 +102,11 @@ class GeneralMotionRetargeting:
+             
+         self.setup_retarget_configuration()
+         
+-        self.ground_offset = 0.0
++        # Per-robot ground offset (metres). Read from the IK config so each
++        # robot can ground the human foot target at the height that puts the
++        # ROBOT SOLE at z=0 (foot-sole depth below the tracked ankle body,
++        # plus measured IK stance residual). Overridable via set_ground_offset.
++        self.ground_offset = ik_config.get("ground_offset", 0.0)
+ 
+     def setup_retarget_configuration(self):
+         self.configuration = mink.Configuration(self.model)
+@@ -152,8 +156,11 @@ class GeneralMotionRetargeting:
+         human_data = self.to_numpy(human_data)
+         human_data = self.scale_human_data(human_data, self.human_root_name, self.human_scale_table)
+         human_data = self.offset_human_data(human_data, self.pos_offsets1, self.rot_offsets1)
+-        human_data = self.apply_ground_offset(human_data)
+         if offset_to_ground:
++            # apply_ground_offset is gated here so that a nonzero per-config
++            # ground_offset leaves offset_to_ground=False runs untouched
++            # (grounding only active with offset_to_ground=True).
++            human_data = self.apply_ground_offset(human_data)
+             human_data = self.offset_human_data_to_ground(human_data)
+         self.scaled_human_data = human_data
+ 

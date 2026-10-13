@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "dataset_id": "commissioned-session-v1",
+  "robot": "unitree_g1",
+  "distribution": "client",
+  "license_scope": "commissioned",
+  "grounded": false,
+  "subject": {
+    "id": "subject-001",
+    "height_m": 1.75,
+    "calibration_pose": "N-pose at clip start",
+    "glove_data": "recorded separately"
+  },
+  "capture": {
+    "software_version": "replace-with-MVN-version",
+    "export_format": "3DSM",
+    "fps": 120,
+    "position_scale_to_m": 0.01,
+    "coordinate_notes": "Z-up; verify against measured calibration pose"
+  },
+  "offsets_file": "inputs/offsets.json",
+  "clips": [
+    {
+      "name": "calibration_walk",
+      "bvh": "inputs/calibration_walk_3dsmax.bvh",
+      "start_frame": 0
+    }
+  ]
+}

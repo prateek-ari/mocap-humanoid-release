@@ -1,0 +1,90 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mocap-g1"
+version = "0.1.0"
+description = "Hardware-independent validation and safety tooling for Xsens-to-Unitree-G1 motion"
+requires-python = ">=3.10"
+dependencies = [
+  # No incompatibility with NumPy 2.3 is recorded anywhere in the repository or
+  # its history (the bound was introduced with the first commit). The pin is
+  # the verified runtime combination (NumPy 2.2.x with SciPy 1.15+/MuJoCo 3.11+,
+  # see docker/gmr-live/Dockerfile) and is enforced in three more places that
+  # must change together: tools/checks/setup_doctor.py, tests/test_setup_doctor.py
+  # and docker/gmr-live/Dockerfile. Widen it only after re-running the full
+  # suite and the setup doctor against the newer NumPy.
+  "numpy>=2.2,<2.3",
+]
+
+[project.optional-dependencies]
+runtime = [
+  # Floors match docker/gmr-live/Dockerfile (mujoco==3.11.0, scipy 1.15.x);
+  # newer minors are tested in CI-equivalent runs (mujoco 3.15, scipy 1.17).
+  "mujoco>=3.11,<4",
+  "scipy>=1.15,<2",
+]
+operator = [
+  "fastapi>=0.115,<1",
+  "uvicorn[standard]>=0.34,<1",
+]
+test = [
+  "pytest>=8,<10",
+  # Starlette 1.x prefers httpx2; httpx keeps older supported resolutions usable.
+  "httpx>=0.27,<1",
+  "httpx2>=2,<3",
+  # Report-only coverage in CI (no threshold).
+  "pytest-cov>=5,<8",
+  # tests/test_packaging.py builds a wheel offline; Python 3.12+ venvs no
+  # longer ship setuptools, so the build backend must be installed explicitly.
+  "setuptools>=68",
+]
+lint = [
+  "ruff>=0.6",
+  "mypy>=1.10",
+]
+# Robot-facing transport for mocap_g1.arm_bridge's DdsTransport. Only needed to
+# talk to a physical G1; every other code path, test and CLI (including
+# `--transport fake`) works without it. cyclonedds is pinned to the version
+# unitree_sdk2py requires, and may additionally need CYCLONEDDS_HOME set to a
+# built Cyclone DDS 0.10.x tree -- see the unitree_sdk2_python README.
+robot = [
+  "cyclonedds==0.10.2",
+  "unitree_sdk2py @ git+https://github.com/unitreerobotics/unitree_sdk2_python.git@814556d15970dd2ecf1c9984e845ca02ab07e206",
+]
+
+[project.scripts]
+mocap-g1-console = "mocap_g1.operator.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["mocap_g1*"]
+
+[tool.setuptools.package-data]
+"mocap_g1.operator" = ["static/*", "static/**/*"]
+# Byte-identical copy of eval/assets/g1_29dof_official.urdf (hash-checked by
+# tests/test_packaging.py) so wheel installs carry their joint limits.
+"mocap_g1.assets" = ["*.urdf"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+extend-exclude = ["operator_ui", "tools/vendor", "artifacts", "tmp"]
+
+[tool.ruff.lint]
+# Conservative bug-finding set: syntax errors, pyflakes, and the mutable /
+# call-in-default-argument checks. Style rules are deliberately not enabled.
+select = ["E9", "F", "B006", "B008"]
+
+[tool.mypy]
+python_version = "3.10"
+files = ["mocap_g1/safety.py", "mocap_g1/live_safety.py", "mocap_g1/arm_bridge.py"]
+ignore_missing_imports = true
+follow_imports = "silent"
+warn_unused_ignores = false
+check_untyped_defs = true
+disallow_untyped_defs = false
