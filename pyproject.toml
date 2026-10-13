@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mocap-g1"
+version = "0.1.0"
+description = "Hardware-independent validation and safety tooling for Xsens-to-Unitree-G1 motion"
+requires-python = ">=3.10"
+dependencies = [
+  # The verified runtime combination is NumPy 2.2.x with SciPy 1.15+ and
+  # MuJoCo 3.11+ (see docker/gmr-live/Dockerfile). The same bound is enforced
+  # in tools/checks/setup_doctor.py and docker/gmr-live/Dockerfile; change
+  # them together and re-run the setup doctor against the newer NumPy.
+  "numpy>=2.2,<2.3",
+]
+
+[project.optional-dependencies]
+runtime = [
+  # Floors match docker/gmr-live/Dockerfile (mujoco==3.11.0, scipy 1.15.x);
+  # newer minors (mujoco 3.15, scipy 1.17) are also verified.
+  "mujoco>=3.11,<4",
+  "scipy>=1.15,<2",
+]
+operator = [
+  "fastapi>=0.115,<1",
+  "uvicorn[standard]>=0.34,<1",
+]
+
+[project.scripts]
+mocap-g1-console = "mocap_g1.operator.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["mocap_g1*"]
+
+[tool.setuptools.package-data]
+"mocap_g1.operator" = ["static/*", "static/**/*"]
+# Official Unitree G1 29-DOF URDF (joint limits), shipped with the package so
+# the live viewer and the console do not depend on files outside the package.
+"mocap_g1.assets" = ["*.urdf"]

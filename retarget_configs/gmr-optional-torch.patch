@@ -1,0 +1,18 @@
+diff --git a/general_motion_retargeting/__init__.py b/general_motion_retargeting/__init__.py
+--- a/general_motion_retargeting/__init__.py
++++ b/general_motion_retargeting/__init__.py
+@@ -3,6 +3,12 @@
+ from .motion_retarget import GeneralMotionRetargeting
+ from .robot_motion_viewer import RobotMotionViewer, draw_frame
+ from .data_loader import load_robot_motion
+-from .kinematics_model import KinematicsModel
+-
++
++try:
++    from .kinematics_model import KinematicsModel
++except ModuleNotFoundError as exc:
++    if exc.name != "torch":
++        raise
++    KinematicsModel = None
++
+ from .neck_retarget import human_head_to_robot_neck
