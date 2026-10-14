@@ -756,6 +756,12 @@ def create_app(
         )
         task.add_done_callback(on_watchdog_done)
         application.state.watchdog_task = task
+        if setup is not None:
+            # App mode only: watch the Xsens port for the Setup screen.
+            try:
+                await asyncio.to_thread(setup.start_stream_monitor)
+            except Exception:
+                logger.exception("Could not start the Xsens stream monitor")
         try:
             yield
         finally:
@@ -768,7 +774,8 @@ def create_app(
                 application.state.watchdog_task = None
                 if setup is not None:
                     # Never leave a setup job (stream check, live viewer,
-                    # render) running after the console exits.
+                    # render) running after the console exits; this also
+                    # closes the stream monitor and releases the UDP port.
                     try:
                         await asyncio.to_thread(setup.shutdown)
                     except Exception:
@@ -985,6 +992,30 @@ def create_app(
         require_same_origin(request.headers.get("origin"))
         await read_json_object(request, label="Stop request", allow_empty=True)
         return await asyncio.to_thread(workbench.stop_job, job_id)
+
+    @app.post("/api/v1/setup/jobs/{job_id}/control", status_code=202)
+    async def control_setup_job(job_id: str, request: Request):
+        workbench = require_setup()
+        require_same_origin(request.headers.get("origin"))
+        body = await read_json_object(request, label="Control request", allow_empty=False)
+        return await asyncio.to_thread(workbench.control_job, job_id, body.get("command"))
+
+    @app.get("/api/v1/setup/stream")
+    async def get_setup_stream():
+        workbench = require_setup()
+        return await asyncio.to_thread(workbench.stream_snapshot)
+
+    @app.get("/api/v1/setup/prefs")
+    async def get_setup_prefs():
+        workbench = require_setup()
+        return await asyncio.to_thread(workbench.prefs)
+
+    @app.put("/api/v1/setup/prefs")
+    async def put_setup_prefs(request: Request):
+        workbench = require_setup()
+        require_same_origin(request.headers.get("origin"))
+        body = await read_json_object(request, label="Preferences", allow_empty=True)
+        return await asyncio.to_thread(workbench.save_prefs, body)
 
     @app.post("/api/v1/setup/viewer/stop")
     async def stop_setup_viewer(request: Request):

@@ -143,6 +143,7 @@ def creation_flags(*, breakaway: bool) -> int:
 class Probe:
     state: str  # "setup" (our console answers), "none" (nothing listens), "busy" (another program)
     detail: str = ""
+    app: bool = False  # the console runs in Windows-app mode (its "app" field is set)
 
 
 # Windows retries a refused loopback connect for about 2 s before failing, so a
@@ -169,7 +170,7 @@ def probe(url: str, *, timeout: float = PROBE_TIMEOUT,
     except Exception as exc:  # answered, but not with HTTP/JSON
         return Probe("busy", type(exc).__name__)
     if status == 200 and isinstance(payload, dict) and "readiness" in payload:
-        return Probe("setup", str(payload.get("platform", "")))
+        return Probe("setup", str(payload.get("platform", "")), app=bool(payload.get("app")))
     return Probe("busy", f"HTTP {status}")
 
 
@@ -256,6 +257,15 @@ def pid_alive(pid: int) -> bool:
             return code.value == STILL_ACTIVE
         finally:
             kernel32.CloseHandle(handle)
+    try:
+        # Reap it if it is our own exited child (the desktop app starts the
+        # server as its child); a zombie would otherwise look alive below.
+        if os.waitpid(pid, os.WNOHANG)[0] == pid:
+            return False
+    except ChildProcessError:
+        pass  # not our child
+    except OSError:
+        pass
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -367,10 +377,27 @@ def wait_until(predicate: Callable[[], bool], timeout: float, *, interval: float
 
 @dataclass
 class Launcher:
+    """Start, track and stop one console server.
+
+    By default it runs the ZIP route's checkout (.venv python, state in
+    %LOCALAPPDATA%\\mocap-humanoid). The desktop app (tools/windows/app.py)
+    passes the interpreter, full command, environment and file locations
+    explicitly instead.
+    """
+
     repo_root: Path = REPO_ROOT
     tools_dir: Path | None = None
     port: int = DEFAULT_PORT
     out: Callable[[str], None] = print
+    # Explicit server command; None derives each from repo_root/tools_dir as before.
+    python: Path | None = None  # also the image a tracked pid must run
+    argv: Sequence[str] | None = None
+    env: Mapping[str, str] | None = None
+    cwd: Path | None = None
+    pid_path: Path | None = None
+    log_path: Path | None = None
+    name: str = "Setup console"
+    missing_hint: str = "run Install-Windows.cmd"
     # Seams for tests.
     probe_fn: Callable[[str], Probe] = probe
     alive_fn: Callable[[int], bool] = pid_alive
@@ -391,13 +418,32 @@ class Launcher:
 
     @property
     def pid_file(self) -> Path:
+        if self.pid_path is not None:
+            return self.pid_path
         assert self.tools_dir is not None
         return self.tools_dir / "setup-console.pid"
 
     @property
     def log_file(self) -> Path:
+        if self.log_path is not None:
+            return self.log_path
         assert self.tools_dir is not None
         return self.tools_dir / "setup-console.log"
+
+    @property
+    def server_python(self) -> Path:
+        return self.python if self.python is not None else venv_python(self.repo_root)
+
+    def server_command(self) -> list[str]:
+        if self.argv is not None:
+            return [str(part) for part in self.argv]
+        return server_argv(self.repo_root, self.port)
+
+    def server_environment(self) -> dict[str, str]:
+        if self.env is not None:
+            return dict(self.env)
+        assert self.tools_dir is not None
+        return server_env(os.environ, self.tools_dir)
 
     def tracked_pid(self) -> int | None:
         """The pid from the pid file if that process is still our console server."""
@@ -405,24 +451,23 @@ class Launcher:
         pid = read_pid(self.pid_file)
         if pid is None:
             return None
-        if self.alive_fn(pid) and self.owner_fn(pid, venv_python(self.repo_root)):
+        if self.alive_fn(pid) and self.owner_fn(pid, self.server_python):
             return pid
         remove_pid(self.pid_file)  # stale
         return None
 
     def start(self) -> int:
-        python = venv_python(self.repo_root)
+        python = self.server_python
         if not python.is_file():
-            raise LauncherError(f"project environment missing ({python}); run Install-Windows.cmd")
-        assert self.tools_dir is not None
-        self.tools_dir.mkdir(parents=True, exist_ok=True)
-        argv = server_argv(self.repo_root, self.port)
-        env = server_env(os.environ, self.tools_dir)
+            raise LauncherError(f"project environment missing ({python}); {self.missing_hint}")
+        self.log_file.parent.mkdir(parents=True, exist_ok=True)
+        argv = self.server_command()
+        env = self.server_environment()
         with open(self.log_file, "ab") as log:
             log.write(f"\n--- {time.strftime('%Y-%m-%d %H:%M:%S')} starting: {argv}\n".encode())
             log.flush()
             options: dict[str, object] = dict(
-                cwd=str(self.repo_root), env=env, stdin=subprocess.DEVNULL,
+                cwd=str(self.cwd or self.repo_root), env=env, stdin=subprocess.DEVNULL,
                 stdout=log, stderr=subprocess.STDOUT, close_fds=True,
             )
             if is_windows():
@@ -443,11 +488,11 @@ class Launcher:
                 return True
             if process.poll() is not None:
                 remove_pid(self.pid_file)
-                raise LauncherError(f"the console stopped; see {self.log_file}")
+                raise LauncherError(f"the {self.name} stopped; see {self.log_file}")
             return False
 
         if not wait_until(ready, START_TIMEOUT, clock=self.clock, sleep=self.sleep):
-            raise LauncherError(f"the console did not start within {START_TIMEOUT:.0f} s; "
+            raise LauncherError(f"the {self.name} did not start within {START_TIMEOUT:.0f} s; "
                                 f"see {self.log_file}")
         return process.pid
 
@@ -458,14 +503,14 @@ class Launcher:
         if pid is None:
             remove_pid(self.pid_file)
             return False
-        self.out("Stopping the Setup console and any running job...")
+        self.out(f"Stopping the {self.name} and any running job...")
         def gone() -> bool:
             return not self.alive_fn(pid)
 
         if self.break_fn(pid) and wait_until(gone, STOP_GRACE, clock=self.clock, sleep=self.sleep):
             remove_pid(self.pid_file)
             return True
-        self.out("The console did not stop in time; ending its process tree.")
+        self.out(f"The {self.name} did not stop in time; ending its process tree.")
         self.kill_fn(pid)
         wait_until(gone, 10.0, clock=self.clock, sleep=self.sleep)
         remove_pid(self.pid_file)
@@ -476,10 +521,10 @@ class Launcher:
         pid = self.tracked_pid()
         owner = f" (pid {pid})" if pid else ""
         if result.state == "setup":
-            return 0, f"Setup console running at {self.url}{owner}"
+            return 0, f"{self.name} running at {self.url}{owner}"
         if result.state == "busy":
             return 1, f"port {self.port} is used by another program ({result.detail})"
-        return 1, "Setup console is not running"
+        return 1, f"{self.name} is not running"
 
     def open(self, *, browser: bool = True,
              open_browser: Callable[[str], bool] = webbrowser.open) -> None:
@@ -504,13 +549,13 @@ def has_console_output() -> bool:
     return sys.stderr is not None and sys.stdout is not None
 
 
-def message_box(text: str, *, error: bool = True) -> None:
+def message_box(text: str, *, error: bool = True, title: str = TITLE) -> None:
     if not is_windows():
         return
     import ctypes
 
     flags = MB_ICONERROR if error else MB_ICONINFORMATION
-    ctypes.windll.user32.MessageBoxW(None, text, TITLE, flags)  # type: ignore[attr-defined]
+    ctypes.windll.user32.MessageBoxW(None, text, title, flags)  # type: ignore[attr-defined]
 
 
 def say(text: str) -> None:

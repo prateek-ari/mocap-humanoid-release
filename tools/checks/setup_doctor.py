@@ -23,6 +23,8 @@ PINNED_GMR = "bb1bbe40774794fceb2a7c579a3464a28e68c844"
 WINDOWS_MIN_PYTHON = (3, 13)
 WINDOWS_PYTHON_REASON = "Windows time.monotonic is 15.6 ms-granular before Python 3.13"
 WINDOWS_INSTALL = "Run Install-Windows.cmd (it installs Python 3.13 and rebuilds the runtime)."
+# The installed Windows app (MOCAP_APP=1): no project .venv, no git checkouts, a bundled runtime.
+APP_REINSTALL = "Reinstall Mocap Humanoid (run its Setup program again)."
 WINDOWS_RUNTIME_MODULES = ("general_motion_retargeting", "mujoco", "mink", "numpy", "scipy", "imageio_ffmpeg")
 GL_PROBE = (
     "import mujoco\n"
@@ -57,6 +59,10 @@ def _is_windows(platform: str | None = None) -> bool:
     return (sys.platform if platform is None else platform) == "win32"
 
 
+def _app_mode(env: dict[str, str] | None) -> bool:
+    return (os.environ if env is None else env).get("MOCAP_APP") == "1"
+
+
 def _interpreter_version() -> tuple[int, int]:
     return sys.version_info[0], sys.version_info[1]
 
@@ -82,9 +88,11 @@ def _version_pair(version: str) -> tuple[int, int] | None:
     return (int(match.group(1)), int(match.group(2))) if match else None
 
 
-def _python_checks(*, include_numpy: bool = True, windows: bool = False) -> list[dict[str, str]]:
+def _python_checks(*, include_numpy: bool = True, windows: bool = False,
+                   app: bool = False) -> list[dict[str, str]]:
     checks = []
-    pip_fix = (r".venv\Scripts\python.exe -m pip install -e ." if windows else "python3 -m pip install -e .")
+    pip_fix = (APP_REINSTALL if app else
+               r".venv\Scripts\python.exe -m pip install -e ." if windows else "python3 -m pip install -e .")
     project_text = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
     requirement = re.search(r'^requires-python\s*=\s*">=(\d+)\.(\d+)"', project_text, re.M)
     if not requirement:
@@ -95,7 +103,7 @@ def _python_checks(*, include_numpy: bool = True, windows: bool = False) -> list
     else:
         minimum = f">={requirement.group(1)}.{requirement.group(2)}"
         checks.append(_check("python", "block", f"Python {sys.version_info.major}.{sys.version_info.minor}; requires {minimum}",
-                             WINDOWS_INSTALL if windows else
+                             APP_REINSTALL if app else WINDOWS_INSTALL if windows else
                              f"Install Python {requirement.group(1)}.{requirement.group(2)}+ and rerun with that interpreter."))
     if windows:
         checks.append(_windows_python_check("python_313", _interpreter_version(), "doctor interpreter"))
@@ -122,20 +130,38 @@ def _windows_python_check(name: str, version: tuple[int, int], label: str) -> di
                   WINDOWS_INSTALL)
 
 
-def _optional_modules(names: tuple[str, ...], extra: str, *, windows: bool = False) -> list[dict[str, str]]:
+def _optional_modules(names: tuple[str, ...], extra: str, *, windows: bool = False,
+                      app: bool = False) -> list[dict[str, str]]:
     checks = []
     for name in names:
         if _module(name):
             checks.append(_check(name, "pass", f"{name} imports"))
         else:
-            fix = (rf'.venv\Scripts\python.exe -m pip install -e ".[{extra}]"' if windows
+            fix = (APP_REINSTALL if app else
+                   rf'.venv\Scripts\python.exe -m pip install -e ".[{extra}]"' if windows
                    else f"python3 -m pip install -e '.[{extra}]'")
             checks.append(_check(name, "block", f"{name} cannot be imported", fix))
     return checks
 
 
-def _runtime_python(workspace: Path, windows: bool) -> Path:
-    return workspace / ("venv/Scripts/python.exe" if windows else "venv/bin/python")
+def _runtime_python(workspace: Path, windows: bool, env: dict[str, str] | None = None) -> Path:
+    """The workspace venv interpreter; a bundled runtime (no venv) uses MOCAP_RUNTIME_PYTHON."""
+    venv = workspace / ("venv/Scripts/python.exe" if windows else "venv/bin/python")
+    bundled = (os.environ if env is None else env).get("MOCAP_RUNTIME_PYTHON", "").strip()
+    if bundled and not (workspace / "venv").exists():
+        return Path(bundled)
+    return venv
+
+
+def _bundled_gmr_revision(workspace: Path) -> str | None:
+    """The commit in GMR_COMMIT.txt of an installed app's runtime (GMR there has no .git)."""
+    for path in (workspace / "GMR" / "GMR_COMMIT.txt", workspace / "GMR_COMMIT.txt"):
+        try:
+            text = path.read_text(encoding="utf-8").strip()
+        except OSError:
+            continue
+        return text.split()[0] if text else ""
+    return None
 
 
 def _verify_command(workspace: Path, windows: bool) -> str:
@@ -164,18 +190,25 @@ def _patch_check(gmr: Path, fix: str) -> dict[str, str]:
     return _check("gmr_patches", "pass", "grounding and optional-torch patches are applied")
 
 
-def _workspace_checks(workspace: Path | None, robot: str, *, windows: bool = False) -> list[dict[str, str]]:
+def _workspace_checks(workspace: Path | None, robot: str, *, windows: bool = False,
+                      env: dict[str, str] | None = None) -> list[dict[str, str]]:
     selected_robot = robot
+    app = _app_mode(env)
     if workspace is None:
+        if app:
+            return [_check("workspace", "block", "No runtime workspace selected (MOCAP_WS is unset)",
+                           APP_REINSTALL)]
         if windows:
             return [_check("workspace", "block", "No runtime workspace selected",
                            r"Set MOCAP_WS or pass --workspace C:\Users\you\mocap-runtime, or run Install-Windows.cmd.")]
         return [_check("workspace", "block", "No external GMR workspace selected",
                        "Set MOCAP_WS=/absolute/external/runtime or pass --workspace /absolute/external/runtime.")]
     gmr = workspace / "GMR"
-    python = _runtime_python(workspace, windows)
+    python = _runtime_python(workspace, windows, env)
     lock = workspace / "runtime-lock.txt"
-    if windows:
+    if app:
+        bootstrap = verify = APP_REINSTALL
+    elif windows:
         bootstrap = verify = WINDOWS_INSTALL
     else:
         workspace_arg = shlex.quote(str(workspace))
@@ -183,8 +216,17 @@ def _workspace_checks(workspace: Path | None, robot: str, *, windows: bool = Fal
         verify = f"python3 tools/bootstrap_g1_workspace.py check --workspace {workspace_arg}"
     probe_timeout = {"timeout": 60} if windows else {}
     checks = []
-    checks.append(_check("gmr_checkout", "pass" if (gmr / ".git").exists() else "block",
-                         str(gmr), bootstrap))
+    bundled_revision = None if (gmr / ".git").exists() else _bundled_gmr_revision(workspace)
+    if bundled_revision is not None:
+        # The installed app ships GMR without .git; GMR_COMMIT.txt names its commit.
+        checks.append(_check("gmr_checkout", "pass" if gmr.is_dir() else "block", str(gmr), bootstrap))
+        checks.append(_check("gmr_revision", "pass" if bundled_revision == PINNED_GMR else "block",
+                             bundled_revision if bundled_revision == PINNED_GMR else
+                             f"Expected {PINNED_GMR}; GMR_COMMIT.txt names {bundled_revision or 'nothing'}",
+                             verify))
+    else:
+        checks.append(_check("gmr_checkout", "pass" if (gmr / ".git").exists() else "block",
+                             str(gmr), bootstrap))
     if (gmr / ".git").exists():
         status, revision = _command(["git", "-C", str(gmr), "rev-parse", "HEAD"])
         if status is None:
@@ -195,8 +237,10 @@ def _workspace_checks(workspace: Path | None, robot: str, *, windows: bool = Fal
             checks.append(_check("gmr_revision", "block", f"Expected {PINNED_GMR}; found {revision}", verify))
     if windows:
         checks.append(_patch_check(gmr, bootstrap))
-    # The Windows runtime lock is a repo constraints file, not a workspace file.
-    for name, path in (("venv_python", python),) if windows else (("venv_python", python), ("runtime_lock", lock)):
+    # The Windows runtime lock is a repo constraints file, not a workspace file; a
+    # bundled runtime has no workspace lock either.
+    for name, path in ((("venv_python", python),) if windows or bundled_revision is not None
+                       else (("venv_python", python), ("runtime_lock", lock))):
         checks.append(_check(name, "pass" if path.is_file() else "block", str(path), bootstrap))
     if python.is_file():
         status, detail = _command([
@@ -246,11 +290,11 @@ def _udp_check(port: int) -> dict[str, str]:
     return _check("udp_port", "pass", f"No listener found on UDP {port}")
 
 
-def _bind_probe(port: int) -> str | None:
-    """Return None when UDP *port* can be bound on all interfaces, else the OS error."""
+def _bind_probe(port: int, bind: str = "0.0.0.0") -> str | None:
+    """Return None when UDP *port* can be bound on *bind* (default all interfaces), else the OS error."""
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
-        sock.bind(("0.0.0.0", port))
+        sock.bind((bind, port))
     except OSError as exc:
         return str(exc)
     finally:
@@ -258,8 +302,8 @@ def _bind_probe(port: int) -> str | None:
     return None
 
 
-def _udp_bind_check(port: int) -> dict[str, str]:
-    error = _bind_probe(port)
+def _udp_bind_check(port: int, bind: str = "0.0.0.0") -> dict[str, str]:
+    error = _bind_probe(port, bind)
     if error is None:
         return _check("udp_port", "pass", f"UDP {port} is free (bind probe succeeded)")
     return _check("udp_port", "block", f"UDP {port} cannot be bound: {error}",
@@ -289,13 +333,14 @@ def _json_tail(text: str) -> dict[str, object]:
     return value if isinstance(value, dict) else {}
 
 
-def _windows_runtime_checks(workspace: Path) -> list[dict[str, str]]:
+def _windows_runtime_checks(workspace: Path, env: dict[str, str] | None = None) -> list[dict[str, str]]:
     """Runtime venv Python version, module imports, and an OpenGL offscreen probe."""
-    python = _runtime_python(workspace, True)
+    python = _runtime_python(workspace, True, env)
+    install = APP_REINSTALL if _app_mode(env) else WINDOWS_INSTALL
     checks: list[dict[str, str]] = []
     if not python.is_file():
         for name in ("runtime_python", "runtime_modules", "opengl"):
-            checks.append(_check(name, "unknown", f"Cannot check without {python}", WINDOWS_INSTALL))
+            checks.append(_check(name, "unknown", f"Cannot check without {python}", install))
         return checks
     status, detail = _command([str(python), "-c", MODULE_PROBE], timeout=60)
     info = _json_tail(detail) if status == 0 else {}
@@ -305,7 +350,7 @@ def _windows_runtime_checks(workspace: Path) -> list[dict[str, str]]:
                                             "runtime venv"))
     else:
         checks.append(_check("runtime_python", "block", (detail or "Runtime venv Python did not run")[:500],
-                             WINDOWS_INSTALL))
+                             install))
     modules = info.get("modules") if isinstance(info.get("modules"), dict) else {}
     errors = info.get("errors") if isinstance(info.get("errors"), dict) else {}
     missing = [name for name in WINDOWS_RUNTIME_MODULES if name not in modules]
@@ -315,10 +360,10 @@ def _windows_runtime_checks(workspace: Path) -> list[dict[str, str]]:
     elif info:
         checks.append(_check("runtime_modules", "block",
                              "Cannot import: " + "; ".join(f"{name} ({errors.get(name, 'missing')})"
-                                                           for name in missing), WINDOWS_INSTALL))
+                                                           for name in missing), install))
     else:
         checks.append(_check("runtime_modules", "block", (detail or "Runtime import probe failed")[:500],
-                             WINDOWS_INSTALL))
+                             install))
     status, detail = _command([str(python), "-c", GL_PROBE], timeout=30)
     if status == 0 and "GL_OK" in detail:
         checks.append(_check("opengl", "pass", "Offscreen MuJoCo renderer produced a frame"))
@@ -342,13 +387,15 @@ def _windows_live_checks(env: dict[str, str], workspace: Path | None) -> list[di
     except ValueError:
         valid_port = False
     if valid_port:
-        checks.append(_udp_bind_check(port))
+        # Xsens on this PC: probe 127.0.0.1 like the viewer, so no Windows Firewall prompt.
+        loopback = env.get("XSENS_SOURCE_IP", "127.0.0.1") in ("", "127.0.0.1")
+        checks.append(_udp_bind_check(port, "127.0.0.1" if loopback else "0.0.0.0"))
     else:
         checks.append(_check("udp_port", "block", f"Invalid XSENS_UDP_PORT={raw_port!r}",
                              '$env:XSENS_UDP_PORT = "5555"'))
-    checks.extend(_workspace_checks(workspace, "unitree_g1", windows=True))
+    checks.extend(_workspace_checks(workspace, "unitree_g1", windows=True, env=env))
     if workspace is not None:
-        checks.extend(_windows_runtime_checks(workspace))
+        checks.extend(_windows_runtime_checks(workspace, env))
     gpu = shutil.which("nvidia-smi")
     if not gpu:
         checks.append(_check("nvidia_gpu", "unknown",
@@ -450,13 +497,14 @@ def diagnose(profile: str, *, workspace: Path | None = None,
         raise ValueError(f"unsupported profile: {profile}")
     windows = _is_windows(platform)
     env = dict(os.environ if env is None else env)
-    checks = _python_checks(include_numpy=profile == "core", windows=windows)
+    app = _app_mode(env)
+    checks = _python_checks(include_numpy=profile == "core", windows=windows, app=app)
     selected = None
     if profile == "recorded":
         selected = workspace or (Path(env["MOCAP_WS"]).expanduser() if env.get("MOCAP_WS") else None)
-        checks.extend(_workspace_checks(selected, robot, windows=windows))
+        checks.extend(_workspace_checks(selected, robot, windows=windows, env=env))
     if with_operator:
-        checks.extend(_optional_modules(("fastapi", "uvicorn"), "operator", windows=windows))
+        checks.extend(_optional_modules(("fastapi", "uvicorn"), "operator", windows=windows, app=app))
     if profile == "live":
         if windows:
             checks.extend(_windows_live_checks(env, workspace or _default_workspace(env)))
@@ -466,7 +514,7 @@ def diagnose(profile: str, *, workspace: Path | None = None,
         "profile": profile, "ok": not any(item["status"] == "block" for item in checks),
         "checks": checks,
     }
-    if profile == "recorded" and selected is not None:
+    if profile == "recorded" and selected is not None and not app:
         report["full_verification"] = _verify_command(selected, windows)
     return report
 

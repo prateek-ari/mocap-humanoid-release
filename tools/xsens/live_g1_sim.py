@@ -11,8 +11,11 @@ from __future__ import annotations
 import argparse
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
+import json
 import math
+import os
 from pathlib import Path
+import select
 import signal
 import sys
 import time
@@ -323,6 +326,14 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--control-stdin",
+        action="store_true",
+        help=(
+            "read control words from stdin (calibrate, toggle_tracking, rearm; one per "
+            "line, same as N / Space / R) and print machine-readable STATUS {json} lines"
+        ),
+    )
+    parser.add_argument(
         "--video-path", default=None, help="default: artifacts/xsens-live/<robot>-live.mp4"
     )
     return parser
@@ -369,11 +380,14 @@ class LiveLoopStats:
             self.estimated_drops += _dropped_between(self.previous_counter, counter)
         self.previous_counter = counter
 
+    def fps(self, *, now: float, started: float) -> float:
+        return self.frames / max(now - started, 1e-9)
+
     def periodic_line(self, *, now: float, started: float, safety_reason: str) -> str | None:
         """The stats line, once every :data:`STATS_INTERVAL_S` seconds."""
         if now - self.reported_at < STATS_INTERVAL_S:
             return None
-        fps = self.frames / max(now - started, 1e-9)
+        fps = self.fps(now=now, started=started)
         self.reported_at = now
         return (
             f"{self.label} live: {fps:.1f} FPS, frames={self.frames}, "
@@ -560,6 +574,94 @@ def wait_for_first_frame(
     return StartupFrame(first_body, first_frame, source, first_source_timestamp)
 
 
+#: stdin control words, mapped to :class:`LiveOperatorControls` methods.
+CONTROL_COMMANDS = {
+    "calibrate": "request_calibration",
+    "toggle_tracking": "toggle_enabled",
+    "rearm": "request_rearm",
+}
+
+
+def apply_control_word(raw: str, controls: LiveOperatorControls) -> None:
+    """Apply one stdin control line; blank lines are ignored, unknown words reported."""
+    word = raw.strip()
+    if not word:
+        return
+    method = CONTROL_COMMANDS.get(word)
+    if method is None:
+        print(f"CONTROL ignored: {word}", file=sys.stderr, flush=True)
+    else:
+        getattr(controls, method)()
+
+
+def stdin_bytes_waiting(fd: int) -> int:
+    """How many bytes can be read from ``fd`` without blocking (OSError at a broken pipe).
+
+    Windows pipes are asked with PeekNamedPipe; elsewhere a ready descriptor
+    reports a read size and the read itself returns b"" at end of input.
+    """
+    if sys.platform != "win32":
+        readable, _, _ = select.select([fd], [], [], 0)
+        return 4096 if readable else 0
+    import ctypes
+    from ctypes import wintypes
+    import msvcrt
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    peek = kernel32.PeekNamedPipe
+    peek.argtypes = (wintypes.HANDLE, wintypes.LPVOID, wintypes.DWORD,
+                     wintypes.LPDWORD, wintypes.LPDWORD, wintypes.LPDWORD)
+    peek.restype = wintypes.BOOL
+    waiting = wintypes.DWORD(0)
+    if not peek(msvcrt.get_osfhandle(fd), None, 0, None, ctypes.byref(waiting), None):
+        raise ctypes.WinError(ctypes.get_last_error())  # ERROR_BROKEN_PIPE: no writer left
+    return int(waiting.value)
+
+
+class StdinControl:
+    """``--control-stdin`` words, read without blocking once per loop tick.
+
+    There is deliberately no reader thread: on Windows a thread blocked in a
+    pipe read stalled the process at start-up (GMR import), and a daemon
+    thread holding stdin at exit can abort the interpreter. Words sent before
+    the loop starts wait in the pipe and apply on the first tick. End of input
+    (or a stdin that is not a pipe) only ends the polling.
+    """
+
+    def __init__(
+        self,
+        controls: LiveOperatorControls,
+        *,
+        fd: int = 0,
+        waiting: Callable[[int], int] = stdin_bytes_waiting,
+        read: Callable[[int, int], bytes] = os.read,
+    ) -> None:
+        self.controls = controls
+        self.fd = fd
+        self.waiting = waiting
+        self.read = read
+        self.partial = b""
+        self.open = True
+
+    def poll(self) -> None:
+        if not self.open:
+            return
+        try:
+            count = self.waiting(self.fd)
+            data = self.read(self.fd, count) if count else None
+        except (OSError, ValueError):
+            self.open = False
+            return
+        if data is None:
+            return
+        if not data:
+            self.open = False
+            return
+        *lines, self.partial = (self.partial + data).split(b"\n")
+        for line in lines:
+            apply_control_word(line.decode("utf-8", errors="replace"), self.controls)
+
+
 class LiveLoop:
     """The receive -> retarget -> condition -> envelope -> viewer loop.
 
@@ -591,6 +693,8 @@ class LiveLoop:
         feet: tuple[tuple[str, float], ...] = (),
         calibrate_after_s: float | None = None,
         abduction_deg: float = 0.0,
+        emit_status: bool = False,
+        control: StdinControl | None = None,
     ) -> None:
         self.receiver = receiver
         self.converter = converter
@@ -610,6 +714,13 @@ class LiveLoop:
         self.feet = feet
         self.calibrate_after_s = calibrate_after_s
         self.abduction_deg = abduction_deg
+        #: Print machine-readable ``STATUS {json}`` lines (``--control-stdin``).
+        self.emit_status = emit_status
+        #: Non-blocking stdin control words (``--control-stdin``), polled each tick.
+        self.control = control
+        #: True after a successful neutral calibration (N key, stdin or --calibrate-after).
+        self.calibrated = False
+        self.previous_status_key: tuple[bool, str, bool] | None = None
         #: Root height correction from the last N-key neutral calibration.
         self.floor_offset = 0.0
         self.stats = LiveLoopStats(label=label)
@@ -654,6 +765,8 @@ class LiveLoop:
             self.tick()
 
     def tick(self) -> None:
+        if self.control is not None:
+            self.control.poll()
         self.handle_rearm()
         self.expire_stale_pending()
         if self.pending_frame is None:
@@ -673,11 +786,35 @@ class LiveLoop:
         clamp_line = self.reporter.clamp_line(output.clamped_joints)
         if clamp_line is not None:
             print(clamp_line, file=sys.stderr)
+        now = self.clock()
         stats_line = self.stats.periodic_line(
-            now=self.clock(), started=self.started, safety_reason=output.reason
+            now=now, started=self.started, safety_reason=output.reason
         )
         if stats_line is not None:
             print(stats_line)
+        if self.emit_status:
+            self.print_status(output.reason, now=now, periodic=stats_line is not None)
+
+    def status(self, reason: str, *, now: float) -> dict[str, Any]:
+        """The ``LiveStatus`` record, from the same counters as the stats line."""
+        fps = self.stats.fps(now=now, started=self.started)
+        return {
+            "enabled": bool(self.controls.enabled),
+            "reason": reason,
+            "fps": round(fps, 1) if math.isfinite(fps) else 0.0,
+            "frames": self.stats.frames,
+            "drops": self.stats.estimated_drops,
+            "failures": self.stats.failures,
+            "calibrated": self.calibrated,
+        }
+
+    def print_status(self, reason: str, *, now: float, periodic: bool) -> None:
+        """``STATUS {json}`` with each stats line and whenever the key fields change."""
+        record = self.status(reason, now=now)
+        key = (record["enabled"], record["reason"], record["calibrated"])
+        if periodic or key != self.previous_status_key:
+            self.previous_status_key = key
+            print("STATUS " + json.dumps(record, allow_nan=False), flush=True)
 
     def handle_rearm(self) -> None:
         if not self.controls.take_rearm_request():
@@ -738,6 +875,7 @@ class LiveLoop:
             f"arm orientation from the current pose ({len(offsets)} arm segments)"
             if offsets else "arms keep the IK config's orientations"
         )
+        self.calibrated = True
         print(f"NEUTRAL CALIBRATION: {arms}{floor}. Press N again in a neutral pose to redo it.")
 
     def process_pending(self) -> None:
@@ -1032,6 +1170,8 @@ def main(argv: list[str] | None = None) -> int:
             feet=robot.feet,
             calibrate_after_s=args.calibrate_after,
             abduction_deg=abduction,
+            emit_status=args.control_stdin,
+            control=StdinControl(controls) if args.control_stdin else None,
         )
         loop.start()
 

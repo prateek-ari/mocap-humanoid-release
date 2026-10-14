@@ -1,5 +1,9 @@
 # Windows: Xsens suit → MuJoCo simulation on one PC
 
+> **Live simulation only? Use the app instead.** The [Mocap Humanoid installer and desktop
+> app](windows-app.md) installs everything offline and runs the live G1/T1 simulation from one
+> window. This ZIP route stays for the recorded BVH route and for development.
+
 Install and run the live suit → MuJoCo G1/T1 simulation (and the recorded BVH route) natively on
 the **same Windows PC that runs Xsens Humanoid**. No Linux PC, Docker or WSL. After a one-click
 install, everything is done in the **Setup console** in your browser.

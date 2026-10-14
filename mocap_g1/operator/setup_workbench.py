@@ -8,6 +8,12 @@ the live steps go through ``tools/xsens/live_operator.sh`` and Docker; on a
 native Windows install (``platform="win32"``) they run the Python tools
 directly with the runtime venv, and Xsens may stream from this PC (127.0.0.1).
 
+With ``MOCAP_APP=1`` (the installed Windows app) the workbench keeps its
+writable state (``session.env``, ``prefs.json``) under ``MOCAP_STATE_DIR``
+because the project folder is read-only, runs the bundled interpreter
+(``MOCAP_RUNTIME_PYTHON``), and owns a :class:`StreamMonitor` that shows
+whether Xsens data is arriving.  Without ``MOCAP_APP`` nothing changes.
+
 It never touches the robot ``SessionController`` and never grants command
 authority.  Every job is an argv list (never a shell); ``session.env`` is
 parsed with :mod:`shlex`, never sourced.  It is only enabled on a
@@ -35,7 +41,9 @@ import threading
 import time
 from typing import Any, Callable, Mapping
 
+from ._version import service_version
 from .core import OperatorError
+from .stream_monitor import StreamMonitor, off_snapshot
 
 
 SESSION_KEYS = (
@@ -115,6 +123,15 @@ SESSION_DIR_LOCATION_MESSAGE = (
     "Session folder must be inside your home folder and outside the project checkout"
 )
 DEFAULT_STREAM_CHECK_S = 30
+#: Jobs that bind (or probe) the Xsens UDP port: the stream monitor releases it first.
+PORT_JOB_KINDS = ("doctor", "acceptance", "live")
+#: Commands a running Windows live simulation accepts on stdin (``--control-stdin``).
+CONTROL_COMMANDS = ("calibrate", "toggle_tracking", "rearm")
+#: The machine status line live_g1_sim.py prints: ``STATUS {json LiveStatus}``.
+STATUS_PREFIX = "STATUS "
+APP_MODE = "windows_app"
+PREFS_SCHEMA = 1
+PREFS_FILE = "prefs.json"
 STOPPED_SUMMARY = "Stopped by the operator."
 _LOCAL_DISPLAY = re.compile(r"(?:(?:unix)?/)?:(\d+)(?:\.\d+)?")
 _ARCHIVE_REVISION = re.compile(r"^node:\s*([0-9a-f]{40})\s*$", re.M)
@@ -160,6 +177,86 @@ def strip_ansi(text: str) -> str:
     """Remove ANSI escape sequences and other control characters except tab."""
 
     return _CONTROL.sub("", _ANSI.sub("", text))
+
+
+def parse_live_status(line: str) -> dict[str, Any] | None:
+    """Return the LiveStatus of a ``STATUS {json}`` line, or ``None`` if malformed."""
+
+    if not line.startswith(STATUS_PREFIX):
+        return None
+    try:
+        data = json.loads(line[len(STATUS_PREFIX):])
+    except ValueError:
+        return None
+    if not isinstance(data, dict):
+        return None
+
+    def whole(name: str) -> int | None:
+        value = data.get(name)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            return None
+        return value
+
+    fps = data.get("fps")
+    flags = (data.get("enabled"), data.get("calibrated"))
+    counts = (whole("frames"), whole("drops"), whole("failures"))
+    if (
+        not all(isinstance(flag, bool) for flag in flags)
+        or not isinstance(data.get("reason"), str)
+        or isinstance(fps, bool)
+        or not isinstance(fps, (int, float))
+        or not math.isfinite(fps)
+        or any(count is None for count in counts)
+    ):
+        return None
+    return {
+        "enabled": data["enabled"],
+        "reason": strip_ansi(data["reason"])[:200],
+        "fps": float(fps),
+        "frames": counts[0],
+        "drops": counts[1],
+        "failures": counts[2],
+        "calibrated": data["calibrated"],
+    }
+
+
+def default_prefs() -> dict[str, Any]:
+    """The app preferences before anything is saved (defaults live in code)."""
+
+    return {"schema": PREFS_SCHEMA, "record_video": False, "calibrate_after_s": None}
+
+
+def _invalid_prefs(message: str, field_name: str) -> SetupError:
+    return SetupError(message, code="invalid_prefs", status_code=400, field=field_name)
+
+
+def merge_prefs(current: Mapping[str, Any], changes: Mapping[str, Any]) -> dict[str, Any]:
+    """Merge a partial Prefs body into ``current``; raise a 400 SetupError if invalid."""
+
+    if not isinstance(changes, Mapping):
+        raise _invalid_prefs("Preferences must be an object", "schema")
+    prefs = dict(current)
+    for name, value in changes.items():
+        if name == "schema":
+            if value != PREFS_SCHEMA or isinstance(value, bool):
+                raise _invalid_prefs(f"schema must be {PREFS_SCHEMA}", name)
+        elif name == "record_video":
+            if not isinstance(value, bool):
+                raise _invalid_prefs("record_video must be true or false", name)
+            prefs[name] = value
+        elif name == "calibrate_after_s":
+            if value is not None:
+                if isinstance(value, bool) or not isinstance(value, (int, float)):
+                    raise _invalid_prefs("calibrate_after_s must be a number of seconds or null",
+                                         name)
+                if not (math.isfinite(value) and 0.5 <= value <= 60):
+                    raise _invalid_prefs("calibrate_after_s must be 0.5–60 s", name)
+                value = float(value)
+            prefs[name] = value
+        else:
+            raise _invalid_prefs(f"Unknown preference: {name}", str(name))
+    prefs["schema"] = PREFS_SCHEMA
+    return prefs
 
 
 def usable_ipv4(value: str) -> bool:
@@ -365,12 +462,16 @@ def default_viewer_running() -> bool:
     return result.returncode == 0 and bool(result.stdout.strip())
 
 
-def default_udp_port_busy(port: int) -> bool:
-    """Whether another program has bound UDP ``port`` (bind without SO_REUSEADDR)."""
+def default_udp_port_busy(port: int, bind: str = "0.0.0.0") -> bool:
+    """Whether another program has bound UDP ``port`` (bind without SO_REUSEADDR).
+
+    The probe binds the address the job will bind (127.0.0.1 when Xsens is on
+    this Windows PC, so the probe raises no Windows Firewall prompt either).
+    """
 
     probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
-        probe.bind(("0.0.0.0", port))
+        probe.bind((bind, port))
     except OSError as exc:
         # WSAEACCES (10013): Windows reports an exclusively bound port as access denied.
         return exc.errno == errno.EADDRINUSE or getattr(exc, "winerror", None) in (10048, 10013)
@@ -399,6 +500,10 @@ class _Job:
     thread: threading.Thread | None = None
     terminator: threading.Thread | None = None
     log_handle: Any = None
+    #: The latest LiveStatus from a live job's ``STATUS {json}`` lines.
+    live_status: dict[str, Any] | None = None
+    #: A Windows live job's stdin (``--control-stdin``); written under ``lock``.
+    control: Any = None
     lock: threading.Lock = field(default_factory=threading.Lock)
 
     def append(self, text: str) -> None:
@@ -406,9 +511,14 @@ class _Job:
             # A progress bar redraws with \r: keep its latest state only.
             segments = [segment for segment in raw.split("\r") if segment.strip()]
             line = strip_ansi(segments[-1] if segments else "").rstrip()
+            status = parse_live_status(line) if self.kind == "live" else None
             with self.lock:
-                self.lines.append(line)
-                self.total_lines += 1
+                if status is not None:
+                    # Machine status goes to the log file only, not the visible log.
+                    self.live_status = status
+                else:
+                    self.lines.append(line)
+                    self.total_lines += 1
                 handle = self.log_handle
             if handle is not None:
                 try:
@@ -428,6 +538,7 @@ class _Job:
             "exit_code": self.exit_code,
             "summary": self.summary,
             "outputs": [path.name for path in self.outputs],
+            "live": dict(self.live_status) if self.live_status is not None else None,
         }
 
     def summary_dict(self) -> dict[str, Any]:
@@ -470,6 +581,12 @@ class SetupWorkbench:
     ``session.env`` instead of a symlink, ``venv/Scripts/python.exe``, the
     Python tools without Docker, and accepts 127.0.0.1 as the Xsens source.
     How job processes are started and stopped always follows the host OS.
+
+    ``app_mode`` (default: ``MOCAP_APP=1``) is the installed Windows app:
+    ``session.env`` and ``prefs.json`` live in ``state_dir`` (default
+    ``MOCAP_STATE_DIR``), the runtime is the bundled interpreter, live video
+    is recorded into the session folder, and a :class:`StreamMonitor`
+    (``stream_monitor`` replaces the default one) watches the Xsens port.
     """
 
     def __init__(
@@ -487,6 +604,9 @@ class SetupWorkbench:
         udp_port_busy: Callable[[int], bool] = default_udp_port_busy,
         stop_grace_s: float = 5.0,
         platform: str | None = None,
+        app_mode: bool | None = None,
+        state_dir: str | Path | None = None,
+        stream_monitor: StreamMonitor | None = None,
     ) -> None:
         self.repo_root = Path(repo_root).expanduser().resolve()
         if not (self.repo_root / "tools" / "xsens" / "live_operator.sh").is_file():
@@ -515,11 +635,30 @@ class SetupWorkbench:
         self._jobs: dict[str, _Job] = {}
         self._order: list[str] = []
         self._counter = 0
+        self.app_mode = os.environ.get("MOCAP_APP") == "1" if app_mode is None else bool(app_mode)
+        if state_dir is None and os.environ.get("MOCAP_STATE_DIR", "").strip():
+            state_dir = os.environ["MOCAP_STATE_DIR"].strip()
+        if state_dir is None and self.app_mode:
+            local = os.environ.get("LOCALAPPDATA", "").strip()
+            state_dir = (Path(local) / "MocapHumanoid" if local
+                         else self.home / ".local" / "state" / "mocap-humanoid")
+        #: Per-user writable state (app mode); ``None`` keeps today's checkout layout.
+        self.state_dir = Path(state_dir).expanduser().resolve() if state_dir is not None else None
+        self._prefs_lock = threading.Lock()
+        self._memory_prefs = default_prefs()
+        if stream_monitor is None and self.app_mode:
+            stream_monitor = StreamMonitor()
+        self._monitor = stream_monitor
+        self._monitor_started = False
 
     # ------------------------------------------------------------------ paths
 
     @property
     def link_path(self) -> Path:
+        """``<repo>/session.env``; in app mode ``<state>/session.env`` (the project is read-only)."""
+
+        if self.app_mode and self.state_dir is not None:
+            return self.state_dir / "session.env"
         return self.repo_root / "session.env"
 
     def _stamp(self, fmt: str) -> str:
@@ -561,16 +700,28 @@ class SetupWorkbench:
         return f"{mocap_ws}/GMR/general_motion_retargeting/ik_configs/bvh_xsens_to_g1.json"
 
     def runtime_python(self, mocap_ws: str) -> str:
-        """The GMR runtime venv interpreter inside ``mocap_ws``."""
+        """The GMR runtime venv interpreter inside ``mocap_ws``.
 
-        if self.windows:
-            return f"{mocap_ws}/venv/Scripts/python.exe"
-        return f"{mocap_ws}/venv/bin/python"
+        A bundled runtime (the installed app: ``mocap_ws`` holds ``GMR`` but no
+        ``venv``) runs on ``MOCAP_RUNTIME_PYTHON``, or in app mode on the
+        console's own interpreter, which has GMR on its path.
+        """
+
+        venv = (f"{mocap_ws}/venv/Scripts/python.exe" if self.windows
+                else f"{mocap_ws}/venv/bin/python")
+        if (Path(mocap_ws) / "venv").exists():
+            return venv
+        bundled = os.environ.get("MOCAP_RUNTIME_PYTHON", "").strip()
+        if not bundled and self.app_mode:
+            bundled = sys.executable
+        return self._text(bundled) if bundled else venv
 
     def _runtime_ready(self, mocap_ws: str) -> bool:
         return Path(self.runtime_python(mocap_ws)).exists() and (Path(mocap_ws) / "GMR").is_dir()
 
     def _installer_hint(self, route: str) -> str:
+        if self.app_mode:
+            return "Reinstall Mocap Humanoid (run its Setup program again)."
         if self.windows:
             return "Run Install-Windows.cmd in the project folder again."
         return "Run the installer and choose 2 · Recorded." if route == "recorded" else (
@@ -863,7 +1014,8 @@ class SetupWorkbench:
             temporary = session_dir / f".session.env.tmp-{os.getpid()}"
             temporary.write_text(self.render_session_env(values), encoding="utf-8")
             os.replace(temporary, env_file)
-            link_temporary = self.repo_root / f".session.env.link-{os.getpid()}"
+            link.parent.mkdir(parents=True, exist_ok=True)
+            link_temporary = link.parent / f".session.env.link-{os.getpid()}"
             if os.path.lexists(link_temporary):
                 link_temporary.unlink()
             if self.windows:
@@ -877,6 +1029,7 @@ class SetupWorkbench:
                 code="session_write_failed",
                 status_code=500,
             ) from exc
+        self._configure_monitor()
         return values
 
     def _is_current(self, env_file: Path) -> bool:
@@ -981,7 +1134,114 @@ class SetupWorkbench:
             },
             "files": self.files(session),
             "jobs": self.list_jobs(),
+            "app": {"mode": APP_MODE, "version": self.app_version()} if self.app_mode else None,
+            "stream": self.stream_snapshot() if self._monitor is not None else None,
+            "prefs": self.prefs(),
         }
+
+    # ------------------------------------------------------- stream monitor
+
+    def _stream_target(self, raw: Mapping[str, str] | None = None) -> tuple[str, int]:
+        """The monitor's address: loopback when Xsens is on this PC, else all interfaces."""
+
+        if raw is None:
+            raw = self.read_session_raw()
+        if raw is None:
+            source = self.builtin_defaults()["windows_xsens_ip"]
+            port_text = XSENS_UDP_PORT
+        else:
+            source = raw.get("WINDOWS_XSENS_IP", "")
+            port_text = raw.get("XSENS_UDP_PORT") or XSENS_UDP_PORT
+        try:
+            port = int(port_text, 10)
+        except ValueError:
+            port = int(XSENS_UDP_PORT)
+        if not 1 <= port <= 65535:
+            port = int(XSENS_UDP_PORT)
+        return (LOOPBACK_SOURCE if source == LOOPBACK_SOURCE else "0.0.0.0"), port
+
+    def _configure_monitor(self) -> None:
+        if self._monitor is None:
+            return
+        bind, port = self._stream_target()
+        self._monitor.configure(bind=bind, port=port)
+
+    def start_stream_monitor(self) -> None:
+        """Start the stream monitor (app mode); called once the console is serving."""
+
+        if self._monitor is None or self._monitor_started:
+            return
+        self._monitor_started = True
+        self._configure_monitor()
+        self._monitor.start()
+
+    def stream_snapshot(self) -> dict[str, Any]:
+        """GET /api/v1/setup/stream: the monitor's StreamSnapshot (state ``off`` without one)."""
+
+        if self._monitor is None:
+            bind, port = self._stream_target()
+            return off_snapshot(bind=bind, port=port)
+        if self._monitor_started:
+            self._configure_monitor()  # follows a hand-edited session.env too
+        return self._monitor.snapshot()
+
+    def _release_port(self) -> None:
+        if self._monitor is not None:
+            self._monitor.pause()
+
+    def _reclaim_port(self) -> None:
+        if self._monitor is not None:
+            self._monitor.resume()
+
+    # ---------------------------------------------------------------- prefs
+
+    @property
+    def prefs_path(self) -> Path | None:
+        return self.state_dir / PREFS_FILE if self.state_dir is not None else None
+
+    def prefs(self) -> dict[str, Any]:
+        """The saved Prefs; defaults for a missing, unreadable or invalid file."""
+
+        path = self.prefs_path
+        with self._prefs_lock:
+            if path is None:
+                return dict(self._memory_prefs)
+            try:
+                saved = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                return default_prefs()
+        if not isinstance(saved, dict):
+            return default_prefs()
+        prefs = default_prefs()
+        for name in ("record_video", "calibrate_after_s"):
+            if name in saved:
+                try:
+                    prefs = merge_prefs(prefs, {name: saved[name]})
+                except SetupError:
+                    pass  # an invalid saved value falls back to its default
+        return prefs
+
+    def save_prefs(self, changes: Mapping[str, Any]) -> dict[str, Any]:
+        """PUT /api/v1/setup/prefs: merge, validate (400) and save atomically."""
+
+        prefs = merge_prefs(self.prefs(), changes)
+        path = self.prefs_path
+        with self._prefs_lock:
+            if path is None:
+                self._memory_prefs = prefs
+                return dict(prefs)
+            try:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                temporary = path.parent / f".{PREFS_FILE}.tmp-{os.getpid()}-{threading.get_ident()}"
+                temporary.write_text(json.dumps(prefs, indent=2) + "\n", encoding="utf-8")
+                os.replace(temporary, path)
+            except OSError as exc:
+                raise SetupError(
+                    f"Could not save the preferences: {exc}",
+                    code="prefs_write_failed",
+                    status_code=500,
+                ) from exc
+        return dict(prefs)
 
     def file_path(self, name: str) -> tuple[Path, str]:
         """Resolve a served session file by basename; raise 404 SetupError otherwise."""
@@ -1068,6 +1328,10 @@ class SetupWorkbench:
             return value
 
         if kind == "live":
+            # Omitted options take the saved app preferences (defaults: no video, no timer).
+            prefs = self.prefs()
+            options = {"calibrate_after_s": prefs["calibrate_after_s"],
+                       "record_video": prefs["record_video"], **options}
             calibrate = options.get("calibrate_after_s")
             if calibrate is not None:
                 if isinstance(calibrate, bool) or not isinstance(calibrate, (int, float)):
@@ -1130,13 +1394,30 @@ class SetupWorkbench:
                     "A live viewer from an earlier run is still running. Stop it, then try again.",
                     code="viewer_running",
                 )
-            port = int(raw.get("XSENS_UDP_PORT") or XSENS_UDP_PORT)
-            if self._udp_port_busy(port):
-                raise SetupError(
-                    f"Another program is using UDP port {port} (a terminal stream check or "
-                    "viewer?). Stop it, then try again.",
-                    code="udp_port_busy",
-                )
+        uses_port = kind in PORT_JOB_KINDS
+        if uses_port:
+            # The stream monitor lets go of the port before the probe and the job;
+            # the job thread takes it back when the job ends.
+            self._release_port()
+        try:
+            if kind in ("acceptance", "live"):
+                port = int(raw.get("XSENS_UDP_PORT") or XSENS_UDP_PORT)
+                if self._port_busy(port, self._udp_bind(session)):
+                    raise SetupError(
+                        f"Another program is using UDP port {port} (a terminal stream check or "
+                        "viewer?). Stop it, then try again.",
+                        code="udp_port_busy",
+                    )
+            job = self._create_job(kind, session, raw, options, uses_port)
+        except BaseException:
+            if uses_port:
+                self._reclaim_port()
+            raise
+        job.thread.start()
+        return job.summary_dict()
+
+    def _create_job(self, kind: str, session: dict[str, Any], raw: dict[str, str],
+                    options: dict[str, Any], uses_port: bool) -> _Job:
         with self._lock:
             self._require_no_running_job_locked()
             self._counter += 1
@@ -1153,12 +1434,16 @@ class SetupWorkbench:
             self._order.append(job.id)
             job.thread = threading.Thread(
                 target=self._execute,
-                args=(job, session, raw, options),
+                args=(job, session, raw, options, uses_port),
                 name=f"mocap-setup-{job.id}",
                 daemon=True,
             )
-        job.thread.start()
-        return job.summary_dict()
+        return job
+
+    def _port_busy(self, port: int, bind: str) -> bool:
+        if self._udp_port_busy is default_udp_port_busy:
+            return default_udp_port_busy(port, bind)
+        return self._udp_port_busy(port)  # an injected probe takes the port only
 
     def _require_no_running_job_locked(self) -> None:
         running = next((job for job in self._jobs.values() if job.state == "running"), None)
@@ -1186,6 +1471,45 @@ class SetupWorkbench:
         self._stop_container()
         return {"stopped": True}
 
+    def control_job(self, job_id: str, command: Any) -> dict[str, Any]:
+        """Send ``command`` (calibrate, toggle_tracking, rearm) to a running live simulation.
+
+        The command is written as one line to the job's stdin (Windows live jobs
+        run ``live_g1_sim.py --control-stdin``).  400 for an unknown command,
+        409 unless the job is a running live job that still reads its stdin.
+        """
+
+        if not isinstance(command, str) or command not in CONTROL_COMMANDS:
+            raise SetupError(
+                f"command must be one of: {', '.join(CONTROL_COMMANDS)}",
+                code="invalid_command",
+                status_code=400,
+                field="command",
+            )
+        job = self._get_job(job_id)
+        refused = SetupError(
+            "Only a running live simulation started from this console accepts commands",
+            code="job_not_controllable",
+            job_id=job.id,
+        )
+        with job.lock:
+            if job.kind != "live" or job.state != "running" or job.stop_requested:
+                raise refused
+            control = job.control
+            if control is None:
+                raise refused
+            try:
+                control.write((command + "\n").encode("utf-8"))
+                control.flush()
+            except (OSError, ValueError) as exc:  # BrokenPipeError, or a closed pipe
+                job.control = None
+                raise SetupError(
+                    "The live simulation is no longer reading commands",
+                    code="job_not_controllable",
+                    job_id=job.id,
+                ) from exc
+        return {"accepted": True}
+
     @staticmethod
     def _label(kind: str, options: Mapping[str, Any]) -> str:
         if kind == "retarget":
@@ -1202,6 +1526,20 @@ class SetupWorkbench:
         }[kind]
 
     def _execute(
+        self,
+        job: _Job,
+        session: dict[str, Any],
+        raw: dict[str, str],
+        options: dict[str, Any],
+        uses_port: bool = False,
+    ) -> None:
+        try:
+            self._execute_job(job, session, raw, options)
+        finally:
+            if uses_port:
+                self._reclaim_port()
+
+    def _execute_job(
         self,
         job: _Job,
         session: dict[str, Any],
@@ -1260,8 +1598,13 @@ class SetupWorkbench:
         env: Mapping[str, str],
         *,
         stdout_path: Path | None = None,
+        control: bool = False,
     ) -> int:
-        """Run ``argv`` in its own process group, streaming output into the job log."""
+        """Run ``argv`` in its own process group, streaming output into the job log.
+
+        ``control=True`` gives the process a stdin pipe that :meth:`control_job`
+        writes commands to (a Windows live simulation with ``--control-stdin``).
+        """
 
         job.append("$ " + self._display_command(argv))
         stdout_handle = None
@@ -1275,12 +1618,13 @@ class SetupWorkbench:
                     argv,
                     cwd=self.repo_root,
                     env=dict(env),
-                    stdin=subprocess.DEVNULL,
+                    stdin=subprocess.PIPE if control else subprocess.DEVNULL,
                     stdout=stdout_handle if stdout_handle is not None else subprocess.PIPE,
                     stderr=subprocess.PIPE if stdout_handle is not None else subprocess.STDOUT,
                     **_new_process_group(),
                 )
                 job.process = process
+                job.control = process.stdin if control else None
         except OSError as exc:
             if stdout_handle is not None:
                 stdout_handle.close()
@@ -1296,6 +1640,13 @@ class SetupWorkbench:
             code = process.wait()
             if stdout_handle is not None:
                 stdout_handle.close()
+            if control:
+                with job.lock:
+                    job.control = None
+                try:
+                    process.stdin.close()
+                except (OSError, ValueError):
+                    pass
         return code
 
     def _display_command(self, argv: list[str]) -> str:
@@ -1364,9 +1715,22 @@ class SetupWorkbench:
         passed = code == 0 and (verdict is None or verdict == "PASS")
         return code, passed
 
-    def _live_video(self, session: Mapping[str, Any], env: Mapping[str, str]) -> Path:
-        """Where the live viewer records (docker/gmr-live/run.sh mounts this folder)."""
+    def _udp_bind(self, session: Mapping[str, Any]) -> str:
+        """127.0.0.1 when Xsens is on this PC (no Windows Firewall prompt), else all interfaces."""
 
+        return LOOPBACK_SOURCE if self._same_pc(session["windows_xsens_ip"]) else "0.0.0.0"
+
+    def _live_video(self, session: Mapping[str, Any], env: Mapping[str, str]) -> Path:
+        """Where the live viewer records (docker/gmr-live/run.sh mounts this folder).
+
+        In app mode the project folder is read-only: the viewer records straight
+        into the session folder under the name the console would copy it to.
+        """
+
+        if self.app_mode and self.windows:
+            return Path(session["session_dir"]) / (
+                f"{session['robot']}-live-{self._stamp('%Y%m%d-%H%M%S')}.mp4"
+            )
         runtime_root = Path(env.get("GMR_LIVE_RUNTIME_ROOT")
                             or self.repo_root / "artifacts" / "xsens-live")
         short = "t1" if session["robot"] == "booster_t1_29dof" else "g1"
@@ -1379,7 +1743,7 @@ class SetupWorkbench:
         port = env.get("XSENS_UDP_PORT") or XSENS_UDP_PORT
         return [
             sys.executable, str(self.repo_root / "tools" / "xsens" / "stream_acceptance.py"),
-            "--bind", "0.0.0.0", "--port", port,
+            "--bind", self._udp_bind(session), "--port", port,
             "--expected-source", session["windows_xsens_ip"],
             "--duration", str(stream_check_seconds(env)),
             *ACCEPTANCE_LIMITS,
@@ -1387,16 +1751,22 @@ class SetupWorkbench:
         ]
 
     def live_argv(self, session: Mapping[str, Any], options: Mapping[str, Any],
-                  env: Mapping[str, str]) -> list[str]:
-        """The live viewer command: Docker on Linux, the runtime venv on Windows."""
+                  env: Mapping[str, str], *, video: Path | None = None) -> list[str]:
+        """The live viewer command: Docker on Linux, the runtime venv on Windows.
+
+        On Windows the viewer takes control commands on stdin and binds
+        127.0.0.1 when Xsens is on this PC.
+        """
 
         if self.windows:
             argv = [
                 self.runtime_python(session["mocap_ws"]),
                 str(self.repo_root / "tools" / "xsens" / "live_g1_sim.py"),
+                "--bind", self._udp_bind(session),
                 "--port", env.get("XSENS_UDP_PORT") or XSENS_UDP_PORT,
                 "--source-ip", session["windows_xsens_ip"],
-                "--video-path", str(self._live_video(session, env)),
+                "--video-path", str(video if video is not None else self._live_video(session, env)),
+                "--control-stdin",
             ]
         else:
             argv = [str(self.repo_root / "tools" / "xsens" / "live_operator.sh"), "gmr"]
@@ -1414,15 +1784,21 @@ class SetupWorkbench:
         if self.windows and options["record_video"]:
             video.parent.mkdir(parents=True, exist_ok=True)
         code = self._run_process(
-            job, self._argv("live", session, options, lambda: self.live_argv(session, options, env)),
+            job,
+            self._argv("live", session, options,
+                       lambda: self.live_argv(session, options, env, video=video)),
             env,
+            control=self.windows,
         )
         if options["record_video"]:
             try:
                 fresh = video.is_file() and video.stat().st_mtime >= job.wall_started_at
             except OSError:
                 fresh = False
-            if fresh:
+            if fresh and video.parent == job.session_dir:
+                job.outputs.append(video)  # app mode: recorded straight into the session
+                job.append(f"Saved video {video.name} in the session folder")
+            elif fresh:
                 target = job.session_dir / (
                     f"{session['robot']}-live-{self._stamp('%Y%m%d-%H%M%S')}.mp4"
                 )
@@ -1540,32 +1916,40 @@ class SetupWorkbench:
         revision_file = job.session_dir / "project-revision.txt"
         report_file = job.session_dir / "core-doctor.json"
         job.outputs += [revision_file, report_file]
-        job.append("$ git rev-parse HEAD")
         failure: str | None = None
-        try:
-            result = subprocess.run(
-                ["git", "rev-parse", "HEAD"],
-                cwd=self.repo_root,
-                capture_output=True,
-                text=True,
-                timeout=30,
-                check=False,
-            )
-        except (OSError, subprocess.SubprocessError) as exc:
-            failure, code = str(exc), 1
+        if self.app_mode and not (self.repo_root / ".git").exists():
+            # The installed app has no .git (and maybe no git); never ask a parent repository.
+            failure, code = "the installed app has no Git checkout", 1
         else:
-            revision = result.stdout.strip()
-            if result.returncode != 0 or not revision:
-                failure = strip_ansi(result.stderr.strip())
-                code = result.returncode or 1
+            job.append("$ git rev-parse HEAD")
+            try:
+                result = subprocess.run(
+                    ["git", "rev-parse", "HEAD"],
+                    cwd=self.repo_root,
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                    check=False,
+                )
+            except (OSError, subprocess.SubprocessError) as exc:
+                failure, code = str(exc), 1
+            else:
+                revision = result.stdout.strip()
+                if result.returncode != 0 or not revision:
+                    failure = strip_ansi(result.stderr.strip())
+                    code = result.returncode or 1
         if failure is not None:
             # A GitHub "Download ZIP" has no .git; its .git_archival.txt names the commit.
             archived = self.archive_revision()
-            if archived is None:
+            if archived is not None:
+                revision = archived
+                job.append(f"No Git checkout; revision {revision} from .git_archival.txt")
+            elif self.app_mode:
+                revision = f"unknown (mocap-g1 {self.app_version()})"
+                job.append(f"No Git checkout or .git_archival.txt; recording {revision}")
+            else:
                 job.append(f"ERROR: git rev-parse failed: {failure}")
                 return code, False
-            revision = archived
-            job.append(f"No Git checkout; revision {revision} from .git_archival.txt")
         revision_file.write_text(revision + "\n", encoding="utf-8")
         job.append(f"Project revision {revision} -> {revision_file.name}")
 
@@ -1593,6 +1977,18 @@ class SetupWorkbench:
             state = "blocked" if not ready else f"exit {code}"
             job.append(f"FAIL: core check is {state}; saved {report_file.name}")
         return code, code == 0
+
+    def app_version(self) -> str:
+        """The installed build's ``<project>/VERSION`` (written by the app build), else the package version."""
+
+        try:
+            text = (self.repo_root / "VERSION").read_text(encoding="utf-8").strip()
+        except OSError:
+            text = ""
+        first = text.splitlines()[0].strip() if text else ""
+        if first and len(first) <= 100 and not _CONTROL.search(first):
+            return first
+        return service_version()
 
     def archive_revision(self) -> str | None:
         """The commit recorded in ``.git_archival.txt`` by ``git archive``, or ``None``."""
@@ -1719,11 +2115,13 @@ class SetupWorkbench:
         exited(self.stop_grace_s)
 
     def shutdown(self) -> None:
-        """Stop any running job; called on console shutdown."""
+        """Stop any running job and the stream monitor; called on console shutdown."""
 
         job = self.running_job()
         if job is not None:
             self.stop_job(job.id, wait=True)
+        if self._monitor is not None:
+            self._monitor.close()
 
 
 def _new_process_group() -> dict[str, Any]:
@@ -1785,11 +2183,15 @@ def require_setup_mode(*, playback: bool, simulation: bool) -> None:
 
 
 __all__ = [
+    "CONTROL_COMMANDS",
     "JOB_KINDS",
     "LOOPBACK_SOURCE",
     "SESSION_KEYS",
     "SetupError",
     "SetupWorkbench",
+    "default_prefs",
+    "merge_prefs",
+    "parse_live_status",
     "parse_session_env",
     "is_windows",
     "require_setup_mode",

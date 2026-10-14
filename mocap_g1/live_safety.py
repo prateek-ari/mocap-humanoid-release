@@ -204,7 +204,7 @@ class LiveG1SafetyController:
 
 
 class LiveOperatorControls:
-    """Small keyboard state holder kept separate from the MuJoCo callback."""
+    """Small operator-request holder shared by the MuJoCo keys and the stdin channel."""
 
     def __init__(self, *, enabled: bool = True) -> None:
         self.enabled = bool(enabled)
@@ -214,19 +214,33 @@ class LiveOperatorControls:
         self._rearm_requested = False
         self._calibration_requested = False
 
+    def request_calibration(self) -> None:
+        """Ask for neutral-pose arm alignment (the N key)."""
+        with self._lock:
+            self._calibration_requested = True
+
+    def request_rearm(self) -> None:
+        """Ask for a reset/rearm from the current simulated pose (the R key)."""
+        with self._lock:
+            self._rearm_requested = True
+
+    def toggle_enabled(self) -> bool:
+        """Flip tracking on or off (the Space key); returns the new state."""
+        with self._lock:
+            self.enabled = not self.enabled
+            return self.enabled
+
     def keyboard_callback(self, keycode: int) -> None:
         try:
             key = chr(keycode).lower()
         except (TypeError, ValueError):
             return
         if key == " ":
-            self.enabled = not self.enabled
+            self.toggle_enabled()
         elif key == "r":
-            with self._lock:
-                self._rearm_requested = True
+            self.request_rearm()
         elif key == "n":
-            with self._lock:
-                self._calibration_requested = True
+            self.request_calibration()
 
     def take_rearm_request(self) -> bool:
         with self._lock:
