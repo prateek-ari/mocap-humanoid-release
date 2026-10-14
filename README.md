@@ -9,13 +9,47 @@ You can use it in two ways:
 
 Everything happens in simulation. No real robot is connected.
 
-## What you need
+Choose your setup: **[Windows](#windows)** (one PC, Xsens and the simulation together, easiest) or **[Ubuntu](#ubuntu)** (a second PC runs the simulation).
+
+## Windows
+
+Run the live simulation on the same Windows PC as Xsens Humanoid. No Ubuntu PC, Docker or WSL.
+
+### What you need
+
+- Windows 10 or 11, 64-bit, with Xsens Humanoid (MVN), its licence, and the MVN Link suit.
+- A graphics card with a current driver (NVIDIA recommended; Intel and AMD also work).
+
+### Install
+
+**[Download Mocap Humanoid for Windows 0.1.0.5](https://files.catbox.moe/jyfv0s.zip)** (104 MB zip, no Internet needed to install)
+
+1. Right-click the downloaded zip → **Extract All**, then double-click `MocapHumanoid-Setup-0.1.0.5.exe`.
+2. Windows may say *"Windows protected your PC"* because the installer is not signed yet: click **More info → Run anyway**. Allow the administrator prompt, click **Install**, then **Finish**.
+
+Everything the app needs is installed into `C:\Program Files\Mocap Humanoid`, with a **Mocap Humanoid** icon on the desktop and in the Start menu. Uninstall it from **Settings → Apps**.
+
+### Use it
+
+1. In Xsens Humanoid open **Options → Network Streamer** and add a stream: destination `127.0.0.1`, port `5555`, UDP, preset *ROS: Position + Orientation (Quaternion) and Joint Angles*, prop and finger segments off.
+2. Open **Mocap Humanoid** from the desktop. When its Xsens lamp turns green, choose the robot and the performer's height and press **Start**. The robot follows the performer in a separate window.
+3. With the performer standing still, arms relaxed, click **Calibrate**. **Stop** ends the run; tick **Record video** before Start to save an MP4.
+
+Details and troubleshooting: [Windows app guide](docs/windows-app.md). The app is new: it passed automated tests on a clean Windows machine but has not yet been used with a real suit.
+
+**Recorded takes on Windows:** the app covers the live route. To turn saved Xsens takes into robot videos on Windows, use the [Windows one-PC setup](docs/windows-setup.md) (download the project and double-click `Install-Windows.cmd`).
+
+## Ubuntu
+
+Xsens Humanoid stays on its Windows PC and streams to an Ubuntu PC that runs the simulation.
+
+### What you need
 
 - A **Windows PC** with Xsens Humanoid (MVN), its licence, and the MVN Link suit with Body Pack and router.
 - An **Ubuntu 22.04 or 24.04 PC** with an NVIDIA graphics card.
 - An **Ethernet cable** from each PC to the Xsens router.
 
-## Install
+### Install
 
 On the Ubuntu PC, open a terminal and paste this line. Press **Enter** to accept each suggested answer:
 
@@ -25,9 +59,7 @@ sudo apt-get update && sudo apt-get install -y git && git clone https://github.c
 
 For the live route, Docker and NVIDIA support must be installed first. The setup guide (step 02) explains how.
 
-**Only have the Windows PC?** The simulation can also run on the same Windows PC as Xsens Humanoid, with no Ubuntu PC, Docker or WSL. Download the project, double-click `Install-Windows.cmd`, then open **Mocap Setup** from the Start menu. See the [Windows one-PC guide](docs/windows-setup.md). This route is new and not yet tested with a real suit.
-
-## Use it
+### Use it
 
 When the installer finishes, it opens the **Setup console** in your browser. After that, open it any time from your applications menu: **Mocap Setup**.
 
@@ -35,10 +67,11 @@ The Setup console walks you through every step with buttons: enter the session d
 
 ## Guides
 
-- **[Setup guide](docs/engineer-setup.html)**: start here. Step by step, with screenshots of what to click. ([Text version](docs/engineer-setup-guide.md))
+- **[Windows app guide](docs/windows-app.md)**: install and use the Windows app, and fix common problems.
+- **[Setup guide](docs/engineer-setup.html)**: the Ubuntu setup, step by step, with screenshots of what to click. ([Text version](docs/engineer-setup-guide.md))
 - **[Windows and Xsens setup](docs/windows-xsens-humanoid-setup.md)**: preparing the suit and streaming on the Windows PC.
-- **[Windows one-PC setup](docs/windows-setup.md)**: run the simulation on the Xsens Windows PC itself, without an Ubuntu PC.
+- **[Windows one-PC setup](docs/windows-setup.md)**: the project's own Windows install, including recorded takes.
 - **[Testing without a suit](docs/testing-without-suit.md)**: check the installation before the suit is connected.
 - **[Engineering reference](docs/engineer-reference.md)**: troubleshooting and details, if something goes wrong.
 
-Something not working? See step 12 of the setup guide, **Fix common problems**.
+Something not working on Ubuntu? See step 12 of the setup guide, **Fix common problems**. On Windows, see the troubleshooting table in the [Windows app guide](docs/windows-app.md).
