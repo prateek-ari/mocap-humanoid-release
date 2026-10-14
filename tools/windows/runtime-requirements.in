@@ -1,0 +1,20 @@
+# Windows runtime workspace (MOCAP_WS\venv) requirements: the verified live/GMR
+# pin set from docker/gmr-live/Dockerfile plus the Xsens BVH loader extras
+# (GMR_XSENS_DEPENDENCIES in tools/bootstrap_g1_workspace.py). GMR itself and
+# this repository are installed afterwards with --no-deps, so GMR's heavy
+# setup.py dependencies (torch, smplx, opencv, redis, proxqp) are never pulled.
+# Regenerate constraints/windows-runtime.txt after editing (command in its header):
+#   uv pip compile tools/windows/runtime-requirements.in --python-platform x86_64-pc-windows-msvc --python-version 3.13 --generate-hashes -o constraints/windows-runtime.txt
+mujoco==3.11.0
+mink==1.2.0
+numpy>=2.2,<2.3
+scipy>=1.15,<1.16
+loop_rate_limiters>=1.2,<2
+rich>=14,<16
+imageio[ffmpeg]>=2.37,<3
+PyQt6>=6.7,<7
+matplotlib>=3.8,<4
+# Build backend for the later `pip install --no-build-isolation --no-deps -e`
+# installs of GMR and this repository, so those builds use this hashed pin
+# instead of fetching an unpinned setuptools into an isolated build env.
+setuptools>=68

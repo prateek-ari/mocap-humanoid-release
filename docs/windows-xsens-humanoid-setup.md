@@ -2,7 +2,8 @@
 
 Use native Windows for Xsens capture when the available entitlement is a single **System
 License**. Keep retargeting and ROS 2 ingestion on a separate Linux machine or inside the project
-containers.
+containers — or, for the live and recorded MuJoCo simulation only, install them natively on this
+same Windows PC with [the one-click Windows install](windows-setup.md).
 
 ```text
 Windows capture PC (licensed)                 Linux/GMR receiver (unlicensed)
@@ -230,8 +231,10 @@ If no viewer opens, first verify `DISPLAY`, `XAUTHORITY`, the X11 socket, NVIDIA
 and `docker image inspect gmr-live:bb1bbe4`. To record the GMR review, add `--record-video`; the
 default path inside the ignored runtime directory is `g1-live.mp4` or `t1-live.mp4`.
 
-If Windows and GMR are on the same physical machine, prefer the offline BVH workflow below. Docker
-Desktop/WSL 2 networking adds a NAT boundary and is not the project's validated live path. Native
+If Windows and GMR are on the same physical machine, use the native
+[Windows install](windows-setup.md): Xsens streams to `127.0.0.1:5555` and the live viewer runs
+without Docker. Docker Desktop/WSL 2 is not a supported live path: its networking adds a NAT
+boundary and MuJoCo's viewer renders through a slow D3D12 translation layer there. Native
 Windows remains responsible for Xsens hardware and licensing; never mount Sentinel or licence data
 into either Linux container.
 

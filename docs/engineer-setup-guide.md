@@ -21,6 +21,8 @@ You need:
 - **Ubuntu 24.04 or 22.04 PC** with a local desktop (not SSH) and an NVIDIA GPU for the live route.
 - **An Ethernet cable** from each PC to the Xsens router. Keep Internet on Wi-Fi.
 
+**Only one PC (Windows)?** The live and recorded simulation also install natively on the Xsens Windows PC with one click: see [Windows: Xsens suit → MuJoCo on one PC](windows-setup.md). This guide covers the two-PC Ubuntu setup.
+
 **How this guide works:** you use the terminal once, to install (step 02). Every later Linux step is done by clicking in the **Setup console**, a page in your browser on the Ubuntu PC. On Windows you work in Xsens Humanoid itself. The few remaining terminal commands are marked, and the console shows them ready to copy.
 
 Simulation shows motion only. It does not prove balance or approve robot hardware. Real-robot control is a separate, later stage (see step 11).

@@ -12,6 +12,7 @@ from pathlib import Path
 import re
 import shlex
 import shutil
+import socket
 import subprocess
 import sys
 
@@ -19,16 +20,51 @@ import sys
 ROOT = Path(__file__).resolve().parents[2]
 IMAGE = "gmr-live:bb1bbe4"
 PINNED_GMR = "bb1bbe40774794fceb2a7c579a3464a28e68c844"
+WINDOWS_MIN_PYTHON = (3, 13)
+WINDOWS_PYTHON_REASON = "Windows time.monotonic is 15.6 ms-granular before Python 3.13"
+WINDOWS_INSTALL = "Run Install-Windows.cmd (it installs Python 3.13 and rebuilds the runtime)."
+WINDOWS_RUNTIME_MODULES = ("general_motion_retargeting", "mujoco", "mink", "numpy", "scipy", "imageio_ffmpeg")
+GL_PROBE = (
+    "import mujoco\n"
+    "xml = \"<mujoco><worldbody><light pos='0 0 3'/><geom type='sphere' size='0.1'/></worldbody></mujoco>\"\n"
+    "model = mujoco.MjModel.from_xml_string(xml)\n"
+    "data = mujoco.MjData(model)\n"
+    "mujoco.mj_forward(model, data)\n"
+    "renderer = mujoco.Renderer(model, 64, 64)\n"
+    "renderer.update_scene(data)\n"
+    "frame = renderer.render()\n"
+    "renderer.close()\n"
+    "print('GL_OK', frame.shape)\n"
+)
+MODULE_PROBE = (
+    "import importlib, json, sys\n"
+    "out = {'python': list(sys.version_info[:3]), 'modules': {}, 'errors': {}}\n"
+    "for name in %s:\n"
+    "    try:\n"
+    "        module = importlib.import_module(name)\n"
+    "        out['modules'][name] = str(getattr(module, '__version__', 'installed'))\n"
+    "    except Exception as exc:\n"
+    "        out['errors'][name] = type(exc).__name__ + ': ' + str(exc)[:200]\n"
+    "print(json.dumps(out))\n"
+) % repr(WINDOWS_RUNTIME_MODULES)
 
 
 def _check(name: str, status: str, detail: str, fix: str = "") -> dict[str, str]:
     return {"name": name, "status": status, "detail": detail, "fix": fix}
 
 
-def _command(argv: list[str]) -> tuple[int | None, str]:
+def _is_windows(platform: str | None = None) -> bool:
+    return (sys.platform if platform is None else platform) == "win32"
+
+
+def _interpreter_version() -> tuple[int, int]:
+    return sys.version_info[0], sys.version_info[1]
+
+
+def _command(argv: list[str], timeout: float = 8) -> tuple[int | None, str]:
     """Return only status and output from bounded, read-only subprocesses."""
     try:
-        result = subprocess.run(argv, text=True, capture_output=True, timeout=8, check=False)
+        result = subprocess.run(argv, text=True, capture_output=True, timeout=timeout, check=False)
     except (OSError, subprocess.TimeoutExpired) as exc:
         return None, str(exc)
     return result.returncode, (result.stdout or result.stderr).strip()
@@ -46,8 +82,9 @@ def _version_pair(version: str) -> tuple[int, int] | None:
     return (int(match.group(1)), int(match.group(2))) if match else None
 
 
-def _python_checks(*, include_numpy: bool = True) -> list[dict[str, str]]:
+def _python_checks(*, include_numpy: bool = True, windows: bool = False) -> list[dict[str, str]]:
     checks = []
+    pip_fix = (r".venv\Scripts\python.exe -m pip install -e ." if windows else "python3 -m pip install -e .")
     project_text = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
     requirement = re.search(r'^requires-python\s*=\s*">=(\d+)\.(\d+)"', project_text, re.M)
     if not requirement:
@@ -58,7 +95,10 @@ def _python_checks(*, include_numpy: bool = True) -> list[dict[str, str]]:
     else:
         minimum = f">={requirement.group(1)}.{requirement.group(2)}"
         checks.append(_check("python", "block", f"Python {sys.version_info.major}.{sys.version_info.minor}; requires {minimum}",
+                             WINDOWS_INSTALL if windows else
                              f"Install Python {requirement.group(1)}.{requirement.group(2)}+ and rerun with that interpreter."))
+    if windows:
+        checks.append(_windows_python_check("python_313", _interpreter_version(), "doctor interpreter"))
     if not include_numpy:
         return checks
     numpy = _module("numpy")
@@ -68,35 +108,80 @@ def _python_checks(*, include_numpy: bool = True) -> list[dict[str, str]]:
         valid = pair is not None and (2, 2) <= pair < (2, 3)
         checks.append(_check("numpy", "pass" if valid else "block",
                              f"NumPy {version} imports" + ("" if valid else "; project requires >=2.2,<2.3"),
-                             "python3 -m pip install -e ."))
+                             pip_fix))
     else:
-        checks.append(_check("numpy", "block", "NumPy cannot be imported",
-                             "python3 -m pip install -e ."))
+        checks.append(_check("numpy", "block", "NumPy cannot be imported", pip_fix))
     return checks
 
 
-def _optional_modules(names: tuple[str, ...], extra: str) -> list[dict[str, str]]:
+def _windows_python_check(name: str, version: tuple[int, int], label: str) -> dict[str, str]:
+    shown = f"{version[0]}.{version[1]}"
+    if version >= WINDOWS_MIN_PYTHON:
+        return _check(name, "pass", f"{label} Python {shown} satisfies >=3.13")
+    return _check(name, "block", f"{label} Python {shown}; Windows requires >=3.13 ({WINDOWS_PYTHON_REASON})",
+                  WINDOWS_INSTALL)
+
+
+def _optional_modules(names: tuple[str, ...], extra: str, *, windows: bool = False) -> list[dict[str, str]]:
     checks = []
     for name in names:
         if _module(name):
             checks.append(_check(name, "pass", f"{name} imports"))
         else:
-            checks.append(_check(name, "block", f"{name} cannot be imported",
-                                 f"python3 -m pip install -e '.[{extra}]'"))
+            fix = (rf'.venv\Scripts\python.exe -m pip install -e ".[{extra}]"' if windows
+                   else f"python3 -m pip install -e '.[{extra}]'")
+            checks.append(_check(name, "block", f"{name} cannot be imported", fix))
     return checks
 
 
-def _workspace_checks(workspace: Path | None, robot: str) -> list[dict[str, str]]:
+def _runtime_python(workspace: Path, windows: bool) -> Path:
+    return workspace / ("venv/Scripts/python.exe" if windows else "venv/bin/python")
+
+
+def _verify_command(workspace: Path, windows: bool) -> str:
+    if windows:
+        return (r".venv\Scripts\python.exe tools\bootstrap_g1_workspace.py check "
+                f'--workspace "{workspace}"')
+    return f"python3 tools/bootstrap_g1_workspace.py check --workspace {shlex.quote(str(workspace))}"
+
+
+def _patch_check(gmr: Path, fix: str) -> dict[str, str]:
+    markers = (
+        ("general_motion_retargeting/motion_retarget.py", "ground_offset = self.ground_offset", "grounding"),
+        ("general_motion_retargeting/motion_retarget.py", 'ik_config.get("ground_offset", 0.0)', "grounding"),
+        ("general_motion_retargeting/__init__.py", "KinematicsModel = None", "optional-torch"),
+    )
+    missing: list[str] = []
+    for relative, marker, label in markers:
+        try:
+            text = (gmr / relative).read_text(encoding="utf-8")
+        except OSError:
+            text = ""
+        if marker not in text and label not in missing:
+            missing.append(label)
+    if missing:
+        return _check("gmr_patches", "block", "GMR patches not applied: " + ", ".join(missing), fix)
+    return _check("gmr_patches", "pass", "grounding and optional-torch patches are applied")
+
+
+def _workspace_checks(workspace: Path | None, robot: str, *, windows: bool = False) -> list[dict[str, str]]:
     selected_robot = robot
     if workspace is None:
+        if windows:
+            return [_check("workspace", "block", "No runtime workspace selected",
+                           r"Set MOCAP_WS or pass --workspace C:\Users\you\mocap-runtime, or run Install-Windows.cmd.")]
         return [_check("workspace", "block", "No external GMR workspace selected",
                        "Set MOCAP_WS=/absolute/external/runtime or pass --workspace /absolute/external/runtime.")]
     gmr = workspace / "GMR"
-    python = workspace / "venv/bin/python"
+    python = _runtime_python(workspace, windows)
     lock = workspace / "runtime-lock.txt"
-    workspace_arg = shlex.quote(str(workspace))
-    bootstrap = f"python3 tools/bootstrap_g1_workspace.py bootstrap --workspace {workspace_arg}"
-    verify = f"python3 tools/bootstrap_g1_workspace.py check --workspace {workspace_arg}"
+    if windows:
+        bootstrap = verify = WINDOWS_INSTALL
+    else:
+        workspace_arg = shlex.quote(str(workspace))
+        bootstrap = f"python3 tools/bootstrap_g1_workspace.py bootstrap --workspace {workspace_arg}"
+        verify = f"python3 tools/bootstrap_g1_workspace.py check --workspace {workspace_arg}"
+    probe_timeout = {"timeout": 60} if windows else {}
     checks = []
     checks.append(_check("gmr_checkout", "pass" if (gmr / ".git").exists() else "block",
                          str(gmr), bootstrap))
@@ -108,7 +193,10 @@ def _workspace_checks(workspace: Path | None, robot: str) -> list[dict[str, str]
             checks.append(_check("gmr_revision", "pass", revision))
         else:
             checks.append(_check("gmr_revision", "block", f"Expected {PINNED_GMR}; found {revision}", verify))
-    for name, path in (("venv_python", python), ("runtime_lock", lock)):
+    if windows:
+        checks.append(_patch_check(gmr, bootstrap))
+    # The Windows runtime lock is a repo constraints file, not a workspace file.
+    for name, path in (("venv_python", python),) if windows else (("venv_python", python), ("runtime_lock", lock)):
         checks.append(_check(name, "pass" if path.is_file() else "block", str(path), bootstrap))
     if python.is_file():
         status, detail = _command([
@@ -116,7 +204,7 @@ def _workspace_checks(workspace: Path | None, robot: str) -> list[dict[str, str]
             "import json,numpy,scipy,mujoco,general_motion_retargeting; "
             "print(json.dumps({'numpy':numpy.__version__,'scipy':scipy.__version__,"
             "'mujoco':mujoco.__version__}))",
-        ])
+        ], **probe_timeout)
         try:
             versions = json.loads(detail.splitlines()[-1]) if status == 0 else {}
         except (ValueError, IndexError):
@@ -156,6 +244,120 @@ def _udp_check(port: int) -> dict[str, str]:
         return _check("udp_port", "block", f"UDP {port} is already bound",
                       f"Stop the existing receiver, then check: ss -H -lun | grep ':{port}'")
     return _check("udp_port", "pass", f"No listener found on UDP {port}")
+
+
+def _bind_probe(port: int) -> str | None:
+    """Return None when UDP *port* can be bound on all interfaces, else the OS error."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        sock.bind(("0.0.0.0", port))
+    except OSError as exc:
+        return str(exc)
+    finally:
+        sock.close()
+    return None
+
+
+def _udp_bind_check(port: int) -> dict[str, str]:
+    error = _bind_probe(port)
+    if error is None:
+        return _check("udp_port", "pass", f"UDP {port} is free (bind probe succeeded)")
+    return _check("udp_port", "block", f"UDP {port} cannot be bound: {error}",
+                  "Close the program using the port (another receiver, or the Setup console's stream check), "
+                  f"then check: netstat -ano -p UDP | findstr :{port}")
+
+
+def _windows_source_check(source: str) -> dict[str, str]:
+    fix = ('Set the Xsens source IP in the Setup console, or in PowerShell: $env:XSENS_SOURCE_IP = "127.0.0.1" '
+           "(Xsens on this PC) or the other PC's IPv4 from ipconfig")
+    try:
+        address = ipaddress.IPv4Address(source or "127.0.0.1")
+    except ipaddress.AddressValueError:
+        return _check("source_ipv4", "block", f"XSENS_SOURCE_IP {source!r} is not an IPv4 address", fix)
+    if address.is_unspecified or address.is_multicast:
+        return _check("source_ipv4", "block", f"XSENS_SOURCE_IP {address} is not a usable source address", fix)
+    if address.is_loopback:
+        return _check("source_ipv4", "pass", f"{address} (Xsens streams from this PC)")
+    return _check("source_ipv4", "pass", f"{address} (Xsens streams from another PC)")
+
+
+def _json_tail(text: str) -> dict[str, object]:
+    try:
+        value = json.loads(text.splitlines()[-1])
+    except (ValueError, IndexError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _windows_runtime_checks(workspace: Path) -> list[dict[str, str]]:
+    """Runtime venv Python version, module imports, and an OpenGL offscreen probe."""
+    python = _runtime_python(workspace, True)
+    checks: list[dict[str, str]] = []
+    if not python.is_file():
+        for name in ("runtime_python", "runtime_modules", "opengl"):
+            checks.append(_check(name, "unknown", f"Cannot check without {python}", WINDOWS_INSTALL))
+        return checks
+    status, detail = _command([str(python), "-c", MODULE_PROBE], timeout=60)
+    info = _json_tail(detail) if status == 0 else {}
+    raw_version = info.get("python")
+    if isinstance(raw_version, list) and len(raw_version) >= 2:
+        checks.append(_windows_python_check("runtime_python", (int(raw_version[0]), int(raw_version[1])),
+                                            "runtime venv"))
+    else:
+        checks.append(_check("runtime_python", "block", (detail or "Runtime venv Python did not run")[:500],
+                             WINDOWS_INSTALL))
+    modules = info.get("modules") if isinstance(info.get("modules"), dict) else {}
+    errors = info.get("errors") if isinstance(info.get("errors"), dict) else {}
+    missing = [name for name in WINDOWS_RUNTIME_MODULES if name not in modules]
+    if info and not missing:
+        checks.append(_check("runtime_modules", "pass",
+                             ", ".join(f"{name} {modules[name]}" for name in WINDOWS_RUNTIME_MODULES)))
+    elif info:
+        checks.append(_check("runtime_modules", "block",
+                             "Cannot import: " + "; ".join(f"{name} ({errors.get(name, 'missing')})"
+                                                           for name in missing), WINDOWS_INSTALL))
+    else:
+        checks.append(_check("runtime_modules", "block", (detail or "Runtime import probe failed")[:500],
+                             WINDOWS_INSTALL))
+    status, detail = _command([str(python), "-c", GL_PROBE], timeout=30)
+    if status == 0 and "GL_OK" in detail:
+        checks.append(_check("opengl", "pass", "Offscreen MuJoCo renderer produced a frame"))
+    else:
+        reason = (detail or "OpenGL probe failed")[-500:]
+        if status is None:
+            reason = f"OpenGL probe did not finish within 30 s: {reason}"
+        checks.append(_check("opengl", "block", f"Offscreen MuJoCo render failed: {reason}",
+                             "Update the graphics driver (Intel, AMD or NVIDIA) from the vendor or Windows Update, "
+                             "then run the Setup console check again. Remote desktop sessions often lack OpenGL; "
+                             "use the PC's own display."))
+    return checks
+
+
+def _windows_live_checks(env: dict[str, str], workspace: Path | None) -> list[dict[str, str]]:
+    checks = [_windows_source_check(env.get("XSENS_SOURCE_IP", ""))]
+    raw_port = env.get("XSENS_UDP_PORT", "5555")
+    try:
+        port = int(raw_port)
+        valid_port = raw_port.isdecimal() and 1 <= port <= 65535
+    except ValueError:
+        valid_port = False
+    if valid_port:
+        checks.append(_udp_bind_check(port))
+    else:
+        checks.append(_check("udp_port", "block", f"Invalid XSENS_UDP_PORT={raw_port!r}",
+                             '$env:XSENS_UDP_PORT = "5555"'))
+    checks.extend(_workspace_checks(workspace, "unitree_g1", windows=True))
+    if workspace is not None:
+        checks.extend(_windows_runtime_checks(workspace))
+    gpu = shutil.which("nvidia-smi")
+    if not gpu:
+        checks.append(_check("nvidia_gpu", "unknown",
+                             "nvidia-smi not found (informational; MuJoCo also runs on Intel and AMD GPUs)"))
+    else:
+        status, detail = _command([gpu, "-L"])
+        checks.append(_check("nvidia_gpu", "pass" if status == 0 else "unknown",
+                             detail or "nvidia-smi reported no NVIDIA GPU (informational)"))
+    return checks
 
 
 def _live_checks(env: dict[str, str]) -> list[dict[str, str]]:
@@ -233,41 +435,52 @@ def _live_checks(env: dict[str, str]) -> list[dict[str, str]]:
     return checks
 
 
+def _default_workspace(env: dict[str, str]) -> Path:
+    if env.get("MOCAP_WS"):
+        return Path(env["MOCAP_WS"]).expanduser()
+    home = env.get("USERPROFILE")
+    return (Path(home) if home else Path.home()) / "mocap-runtime"
+
+
 def diagnose(profile: str, *, workspace: Path | None = None,
              robot: str = "unitree_g1", with_operator: bool = False,
-             env: dict[str, str] | None = None) -> dict[str, object]:
+             env: dict[str, str] | None = None,
+             platform: str | None = None) -> dict[str, object]:
     if profile not in ("core", "recorded", "live"):
         raise ValueError(f"unsupported profile: {profile}")
+    windows = _is_windows(platform)
     env = dict(os.environ if env is None else env)
-    checks = _python_checks(include_numpy=profile == "core")
+    checks = _python_checks(include_numpy=profile == "core", windows=windows)
+    selected = None
     if profile == "recorded":
         selected = workspace or (Path(env["MOCAP_WS"]).expanduser() if env.get("MOCAP_WS") else None)
-        checks.extend(_workspace_checks(selected, robot))
+        checks.extend(_workspace_checks(selected, robot, windows=windows))
     if with_operator:
-        checks.extend(_optional_modules(("fastapi", "uvicorn"), "operator"))
+        checks.extend(_optional_modules(("fastapi", "uvicorn"), "operator", windows=windows))
     if profile == "live":
-        checks.extend(_live_checks(env))
+        if windows:
+            checks.extend(_windows_live_checks(env, workspace or _default_workspace(env)))
+        else:
+            checks.extend(_live_checks(env))
     report: dict[str, object] = {
         "profile": profile, "ok": not any(item["status"] == "block" for item in checks),
         "checks": checks,
     }
     if profile == "recorded" and selected is not None:
-        report["full_verification"] = (
-            f"python3 tools/bootstrap_g1_workspace.py check --workspace {shlex.quote(str(selected))}"
-        )
+        report["full_verification"] = _verify_command(selected, windows)
     return report
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("profile", choices=("core", "recorded", "live"))
-    parser.add_argument("--workspace", type=Path, help="external GMR workspace (recorded profile)")
+    parser.add_argument("--workspace", type=Path, help="external GMR workspace (recorded profile; live on Windows)")
     parser.add_argument("--robot", choices=("unitree_g1", "booster_t1_29dof"),
                         default="unitree_g1", help="required recorded model (default: %(default)s)")
     parser.add_argument("--with-operator", action="store_true", help="also test FastAPI and Uvicorn")
     parser.add_argument("--json", action="store_true", help="print machine-readable report")
     args = parser.parse_args(argv)
-    if args.workspace and args.profile != "recorded":
+    if args.workspace and args.profile != "recorded" and not (args.profile == "live" and _is_windows()):
         parser.error("--workspace is only used by the recorded profile")
     if args.profile == "live" and args.robot != "unitree_g1":
         parser.error("live streaming supports unitree_g1 only; use recorded for Booster T1")

@@ -25,6 +25,8 @@ runtime = [
 operator = [
   "fastapi>=0.115,<1",
   "uvicorn[standard]>=0.34,<1",
+  # Lists network adapters for the Setup console on Windows (Linux uses `ip`).
+  "psutil>=5.9,<8; sys_platform == 'win32'",
 ]
 
 [project.scripts]

@@ -1,0 +1,16 @@
+# Line endings that must not depend on the cloning machine's core.autocrlf.
+# Windows entry points: cmd.exe and PowerShell 5.1 expect CRLF (cmd's label
+# search misbehaves with LF-only files). GitHub "Download ZIP" archives apply
+# these too, so the ZIP carries CRLF for them as well.
+*.cmd text eol=crlf
+*.bat text eol=crlf
+*.ps1 text eol=crlf
+# Bash refuses CRLF ("$'\r': command not found"), also inside Docker builds
+# from a Windows checkout.
+*.sh text eol=lf
+# GMR patches are applied byte-for-byte to LF sources with `git apply`. -text
+# (no conversion at all) rather than eol=lf: the committed bytes are exactly
+# what is applied, and a patch that ever needs a CR in its content survives.
+*.patch -text
+# Lets a GitHub "Download ZIP" (git archive) record the commit it was made from.
+.git_archival.txt export-subst

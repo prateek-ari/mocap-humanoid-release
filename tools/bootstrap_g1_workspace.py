@@ -5,23 +5,51 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
 import sys
+import tempfile
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 GMR_REPOSITORY = "https://github.com/YanjieZe/GMR.git"
 GMR_COMMIT = "bb1bbe40774794fceb2a7c579a3464a28e68c844"
 GMR_XSENS_DEPENDENCIES = ("PyQt6>=6.7,<7", "matplotlib>=3.8,<4")
+# Windows installs the whole runtime from this hashed lock (generated from
+# tools/windows/runtime-requirements.in), then GMR and this repository with
+# --no-deps, so GMR's Linux-oriented setup.py dependencies are never resolved.
+WINDOWS_RUNTIME_LOCK = REPO_ROOT / "constraints/windows-runtime.txt"
+# Windows wheels, the GMR fetch and the first pip run can take far longer than
+# the Linux default on a slow link; never let a large download hit 300 s.
+WINDOWS_INSTALL_TIMEOUT = 3600
 
 
 class BootstrapError(RuntimeError):
     pass
 
 
-def _run(command: list[str], *, cwd: Path | None = None, capture: bool = False) -> str:
+def _is_windows(platform: str | None = None) -> bool:
+    return (sys.platform if platform is None else platform) == "win32"
+
+
+def venv_python(venv: Path, *, platform: str | None = None) -> Path:
+    """Return the interpreter of a venv: Scripts/python.exe on Windows, bin/python elsewhere."""
+
+    if _is_windows(platform):
+        return venv / "Scripts" / "python.exe"
+    return venv / "bin" / "python"
+
+
+def _run(
+    command: list[str],
+    *,
+    cwd: Path | None = None,
+    capture: bool = False,
+    timeout: float = 300,
+    env: dict[str, str] | None = None,
+) -> str:
     try:
         result = subprocess.run(
             command,
@@ -29,7 +57,8 @@ def _run(command: list[str], *, cwd: Path | None = None, capture: bool = False) 
             check=False,
             text=True,
             capture_output=capture,
-            timeout=300,
+            timeout=timeout,
+            env=env,
         )
     except subprocess.TimeoutExpired as exc:
         raise BootstrapError(f"command timed out: {' '.join(command)}") from exc
@@ -46,9 +75,24 @@ def _safe_workspace(value: str | Path) -> Path:
     path = Path(value).expanduser().resolve()
     if path == Path(path.anchor) or len(path.parts) < 4:
         raise BootstrapError(f"refusing broad workspace path: {path}")
-    if path == REPO_ROOT or REPO_ROOT in path.parents:
+    # normcase is the identity on POSIX and folds case on Windows (C:\Repo == c:\repo).
+    repo = os.path.normcase(str(REPO_ROOT))
+    if os.path.normcase(str(path)) == repo or any(
+        os.path.normcase(str(parent)) == repo for parent in path.parents
+    ):
         raise BootstrapError("runtime workspace must be outside this source checkout")
     return path
+
+
+def normalized_patch_bytes(data: bytes) -> bytes:
+    """Return patch bytes with CRLF line endings converted to LF.
+
+    The patches target LF files in GMR (checked out with core.autocrlf=false).
+    A Windows clone or ZIP extraction tool may have given the patch file CRLF
+    endings, which `git apply` would then fail to match.
+    """
+
+    return data.replace(b"\r\n", b"\n")
 
 
 def _apply_patch(
@@ -61,21 +105,86 @@ def _apply_patch(
     source = gmr / source_path
     if marker in source.read_text(encoding="utf-8"):
         return
-    _run(["git", "apply", "--check", str(patch)], cwd=gmr)
-    _run(["git", "apply", str(patch)], cwd=gmr)
+    data = patch.read_bytes()
+    normalized = normalized_patch_bytes(data)
+    if normalized == data:
+        _run(["git", "apply", "--check", str(patch)], cwd=gmr)
+        _run(["git", "apply", str(patch)], cwd=gmr)
+        return
+    with tempfile.TemporaryDirectory(prefix="mocap-patch-") as directory:
+        lf_patch = Path(directory) / patch.name
+        lf_patch.write_bytes(normalized)
+        _run(["git", "apply", "--check", str(lf_patch)], cwd=gmr)
+        _run(["git", "apply", str(lf_patch)], cwd=gmr)
+
+
+def _install_windows_runtime(python: str, gmr: Path) -> None:
+    """Install the hashed Windows runtime lock, then GMR and this repo without deps."""
+
+    timeout = WINDOWS_INSTALL_TIMEOUT
+    # GMR's setup.py reads its UTF-8 README with the locale encoding (cp1252 on
+    # most Windows PCs), which fails on its emoji; UTF-8 mode fixes the build.
+    env = {**os.environ, "PYTHONUTF8": "1"}
+    # Hashes in the lock switch pip to --require-hashes for this call only; the
+    # editable installs below are separate calls (editables cannot be hashed).
+    _run([python, "-m", "pip", "install", "--require-hashes", "-r", str(WINDOWS_RUNTIME_LOCK)],
+         timeout=timeout, env=env)
+    # setuptools comes from the hashed lock, so build without an isolated env
+    # (which would download an unpinned setuptools).
+    for project in (gmr, REPO_ROOT):
+        _run([python, "-m", "pip", "install", "--no-deps", "--no-build-isolation",
+              "-e", str(project)], timeout=timeout, env=env)
+
+
+def _require_windows_python(python: str) -> None:
+    """The live loop needs Python >= 3.13 on Windows (finer time.monotonic)."""
+
+    probe = subprocess.run(
+        [python, "-c", "import sys; sys.exit(0 if sys.version_info >= (3, 13) else 1)"],
+        check=False,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    if probe.returncode:
+        raise BootstrapError(
+            f"{python} is older than Python 3.13 (required on Windows); move the "
+            "runtime venv folder aside and rerun the bootstrap"
+        )
+
+
+def _git_succeeds(command: list[str], cwd: Path) -> bool:
+    return subprocess.run(
+        command, cwd=cwd, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+    ).returncode == 0
+
+
+def _fetch_pinned_gmr(gmr: Path, *, add_remote: bool) -> None:
+    # Before checkout: keep upstream LF endings (Git for Windows defaults to
+    # core.autocrlf=true), so the LF patches below apply. A no-op on Linux.
+    _run(["git", "config", "core.autocrlf", "false"], cwd=gmr)
+    if add_remote:
+        _run(["git", "remote", "add", "origin", GMR_REPOSITORY], cwd=gmr)
+    _run(["git", "fetch", "--depth", "1", "origin", GMR_COMMIT], cwd=gmr,
+         timeout=WINDOWS_INSTALL_TIMEOUT if _is_windows() else 300)
+    _run(["git", "checkout", "-q", "FETCH_HEAD"], cwd=gmr)
 
 
 def bootstrap(workspace: Path, *, install: bool) -> None:
     workspace.mkdir(parents=True, exist_ok=True)
     gmr = workspace / "GMR"
+    windows = _is_windows()
     if not gmr.exists():
         gmr.mkdir()
         _run(["git", "init", "-q"], cwd=gmr)
-        _run(["git", "remote", "add", "origin", GMR_REPOSITORY], cwd=gmr)
-        _run(["git", "fetch", "--depth", "1", "origin", GMR_COMMIT], cwd=gmr)
-        _run(["git", "checkout", "-q", "FETCH_HEAD"], cwd=gmr)
+        _fetch_pinned_gmr(gmr, add_remote=True)
     elif not (gmr / ".git").is_dir():
         raise BootstrapError(f"{gmr} exists but is not a Git checkout")
+    elif not _git_succeeds(["git", "rev-parse", "--verify", "-q", "HEAD"], gmr):
+        # An earlier run stopped between `git init` and checkout (for example a
+        # dropped connection during the fetch): resume instead of failing forever.
+        _fetch_pinned_gmr(
+            gmr, add_remote=not _git_succeeds(["git", "remote", "get-url", "origin"], gmr)
+        )
     revision = _run(["git", "rev-parse", "HEAD"], cwd=gmr, capture=True)
     if revision != GMR_COMMIT:
         raise BootstrapError(f"{gmr} is at {revision}; expected pinned commit {GMR_COMMIT}")
@@ -103,9 +212,11 @@ def bootstrap(workspace: Path, *, install: bool) -> None:
 
     if install:
         venv = workspace / "venv"
-        venv_python = venv / "bin/python"
-        venv_ready = venv_python.is_file() and subprocess.run(
-            [str(venv_python), "-m", "pip", "--version"],
+        runtime_python = venv_python(venv)
+        if windows and sys.version_info < (3, 13):
+            raise BootstrapError("the Windows runtime needs Python >= 3.13; run Install-Windows.cmd")
+        venv_ready = runtime_python.is_file() and subprocess.run(
+            [str(runtime_python), "-m", "pip", "--version"],
             check=False,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -120,7 +231,13 @@ def bootstrap(workspace: Path, *, install: bool) -> None:
                         f"stdlib venv creation failed and virtualenv is unavailable: {stdlib_error}"
                     ) from stdlib_error
                 _run([virtualenv, "--python", sys.executable, str(venv)])
-        python = str(venv_python)
+        python = str(runtime_python)
+        if windows:
+            _require_windows_python(python)
+            _install_windows_runtime(python, gmr)
+            frozen = _run([python, "-m", "pip", "freeze", "--all"], capture=True)
+            (workspace / "runtime-lock.txt").write_text(frozen + "\n", encoding="utf-8")
+            return
         _run([python, "-m", "pip", "install", "--upgrade", "pip", "setuptools", "wheel"])
         gmr_installed = subprocess.run(
             [python, "-c", "import general_motion_retargeting"],
@@ -142,7 +259,7 @@ def bootstrap(workspace: Path, *, install: bool) -> None:
 
 def check(workspace: Path, *, require_runtime: bool = True) -> dict:
     gmr = workspace / "GMR"
-    python = workspace / "venv/bin/python"
+    python = venv_python(workspace / "venv")
     checks: dict[str, dict[str, object]] = {}
 
     def record(name: str, ok: bool, detail: str) -> None:

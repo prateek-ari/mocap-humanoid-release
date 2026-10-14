@@ -663,6 +663,8 @@ def main() -> int:
 
     signal.signal(signal.SIGINT, _stop)
     signal.signal(signal.SIGTERM, _stop)
+    if hasattr(signal, "SIGBREAK"):  # Windows console stop (CTRL_BREAK_EVENT)
+        signal.signal(signal.SIGBREAK, _stop)
 
     source_sha256 = _sha256(args.bvh_file)
     if args.offsets_file is None:

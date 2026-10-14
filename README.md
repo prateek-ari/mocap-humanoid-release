@@ -25,6 +25,8 @@ sudo apt-get update && sudo apt-get install -y git && git clone https://github.c
 
 For the live route, Docker and NVIDIA support must be installed first. The setup guide (step 02) explains how.
 
+**Only have the Windows PC?** The simulation can also run on the same Windows PC as Xsens Humanoid, with no Ubuntu PC, Docker or WSL. Download the project, double-click `Install-Windows.cmd`, then open **Mocap Setup** from the Start menu. See the [Windows one-PC guide](docs/windows-setup.md). This route is new and not yet tested with a real suit.
+
 ## Use it
 
 When the installer finishes, it opens the **Setup console** in your browser. After that, open it any time from your applications menu: **Mocap Setup**.
@@ -35,6 +37,7 @@ The Setup console walks you through every step with buttons: enter the session d
 
 - **[Setup guide](docs/engineer-setup.html)**: start here. Step by step, with screenshots of what to click. ([Text version](docs/engineer-setup-guide.md))
 - **[Windows and Xsens setup](docs/windows-xsens-humanoid-setup.md)**: preparing the suit and streaming on the Windows PC.
+- **[Windows one-PC setup](docs/windows-setup.md)**: run the simulation on the Xsens Windows PC itself, without an Ubuntu PC.
 - **[Testing without a suit](docs/testing-without-suit.md)**: check the installation before the suit is connected.
 - **[Engineering reference](docs/engineer-reference.md)**: troubleshooting and details, if something goes wrong.
 

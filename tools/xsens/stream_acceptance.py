@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+import signal
 import socket
 import sys
 import time
@@ -99,6 +100,8 @@ def main() -> int:
         help="grade deterministic synthetic packets instead of opening a UDP socket",
     )
     args = parser.parse_args()
+    if hasattr(signal, "SIGBREAK"):  # Windows Ctrl+Break -> same path as Ctrl+C
+        signal.signal(signal.SIGBREAK, signal.default_int_handler)
 
     if not 1 <= args.port <= 65535:
         parser.error("--port must be between 1 and 65535")

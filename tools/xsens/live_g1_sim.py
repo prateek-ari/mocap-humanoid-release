@@ -945,6 +945,8 @@ def main(argv: list[str] | None = None) -> int:
 
     signal.signal(signal.SIGINT, _stop)
     signal.signal(signal.SIGTERM, _stop)
+    if hasattr(signal, "SIGBREAK"):  # Windows console stop (CTRL_BREAK_EVENT)
+        signal.signal(signal.SIGBREAK, _stop)
 
     try:
         from general_motion_retargeting import GeneralMotionRetargeting, RobotMotionViewer

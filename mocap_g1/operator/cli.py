@@ -188,7 +188,8 @@ def _setup_root() -> Path:
         raise ValueError(
             f"--setup needs a source checkout of mocap_humanoid; {root} has no "
             "tools/xsens/live_operator.sh. Run the console from the checkout "
-            "(.venv/bin/mocap-g1-console --setup after tools/setup/install.sh)"
+            "(.venv/bin/mocap-g1-console --setup after tools/setup/install.sh, or the "
+            "Mocap Setup shortcut after Install-Windows.cmd)"
         )
     return root
 

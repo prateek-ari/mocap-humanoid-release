@@ -2,8 +2,11 @@
 
 The workbench backs the operator console's Setup workspace.  It reads and
 writes ``session.env`` in exactly the format ``tools/setup/new_session.sh``
-writes, and runs the guide's Linux steps (system check, stream check, live
-simulation, BVH check, retarget, render, save) as background jobs.
+writes, and runs the guide's steps (system check, stream check, live
+simulation, BVH check, retarget, render, save) as background jobs.  On Linux
+the live steps go through ``tools/xsens/live_operator.sh`` and Docker; on a
+native Windows install (``platform="win32"``) they run the Python tools
+directly with the runtime venv, and Xsens may stream from this PC (127.0.0.1).
 
 It never touches the robot ``SessionController`` and never grants command
 authority.  Every job is an argv list (never a shell); ``session.env`` is
@@ -82,6 +85,11 @@ ROBOTS = ("unitree_g1", "booster_t1_29dof")
 XSENS_UDP_PORT = "5555"
 JOB_KINDS = ("doctor", "acceptance", "live", "bvh_check", "retarget", "render", "save")
 JOB_STATES = ("running", "passed", "failed", "stopped")
+#: Xsens Humanoid on the same Windows PC streams to (and from) this address.
+LOOPBACK_SOURCE = "127.0.0.1"
+# Mirrors live_operator.sh acceptance; the duration comes from stream_check_seconds().
+ACCEPTANCE_LIMITS = ("--minimum-body-frames", "300", "--minimum-rate", "50",
+                     "--maximum-loss", "0.01", "--require-joint-angles")
 MAX_LOG_LINES = 5000
 MAX_LINES_PER_RESPONSE = 2000
 MAX_LISTED_JOBS = 20
@@ -109,6 +117,7 @@ SESSION_DIR_LOCATION_MESSAGE = (
 DEFAULT_STREAM_CHECK_S = 30
 STOPPED_SUMMARY = "Stopped by the operator."
 _LOCAL_DISPLAY = re.compile(r"(?:(?:unix)?/)?:(\d+)(?:\.\d+)?")
+_ARCHIVE_REVISION = re.compile(r"^node:\s*([0-9a-f]{40})\s*$", re.M)
 _ENV_HEADER = (
     "# Mocap session created {created} by the operator console Setup tab\n"
     "# Load in each new terminal from the checkout: source session.env\n"
@@ -164,6 +173,12 @@ def usable_ipv4(value: str) -> bool:
     return parts[0] != 0 and parts[0] != 127 and parts[0] < 224
 
 
+def is_windows(platform: str | None = None) -> bool:
+    """Whether ``platform`` (default ``sys.platform``) is a native Windows install."""
+
+    return (sys.platform if platform is None else platform) == "win32"
+
+
 def parse_session_env(text: str) -> dict[str, str]:
     """Return the known ``export KEY=VALUE`` assignments of a session.env.
 
@@ -194,11 +209,12 @@ def _format_number(value: float | int) -> str:
     return repr(float(value))
 
 
-def _tilde(path: str, home: Path) -> str:
-    home_text = str(home)
-    if path == home_text:
+def _tilde(path: str, home: Path | str, *, fold_case: bool = False) -> str:
+    home_text = home if isinstance(home, str) else str(home)
+    key, home_key = (path.casefold(), home_text.casefold()) if fold_case else (path, home_text)
+    if key == home_key:
         return "~"
-    if path.startswith(home_text + "/"):
+    if key.startswith(home_key + "/"):
         return "~/" + path[len(home_text) + 1 :]
     return path
 
@@ -207,9 +223,41 @@ def _tilde(path: str, home: Path) -> str:
 _VIRTUAL_INTERFACE = re.compile(r"^(docker\d*|br-[0-9a-f]+|virbr\d+|veth.*|lxc.*|lxdbr\d+|cni\d+|flannel.*|tailscale\d*|zt.*)$")
 
 
+# Windows adapter names that never carry the Xsens stream (WSL/Hyper-V, VPNs, VMs, loopback).
+_WINDOWS_VIRTUAL_INTERFACE = re.compile(
+    r"loopback|vethernet|hyper-v|wsl|virtualbox|vmware|bluetooth|tailscale|zerotier|tap-|npcap|vpn",
+    re.I,
+)
+
+
+def _windows_interfaces() -> list[dict[str, str]]:
+    """Return up IPv4 adapters from psutil (Windows has no ``ip``); empty without psutil."""
+
+    try:
+        import psutil
+    except ImportError:
+        return []
+    try:
+        stats = psutil.net_if_stats()
+        addresses = psutil.net_if_addrs()
+    except OSError:
+        return []
+    interfaces = []
+    for name, entries in addresses.items():
+        if _WINDOWS_VIRTUAL_INTERFACE.search(name) or (name in stats and not stats[name].isup):
+            continue
+        for entry in entries:
+            local = entry.address
+            if entry.family == socket.AF_INET and usable_ipv4(local) and not local.startswith("169.254."):
+                interfaces.append({"name": name, "ipv4": local})
+    return interfaces
+
+
 def default_interfaces() -> list[dict[str, str]]:
     """Return physical IPv4 interfaces from ``ip -j -4 addr`` (no loopback or bridges)."""
 
+    if is_windows():
+        return _windows_interfaces()
     try:
         result = subprocess.run(
             ["ip", "-j", "-4", "addr"],
@@ -238,6 +286,17 @@ def default_route_source(destination: str) -> str | None:
 
     if not usable_ipv4(destination):
         return None
+    if is_windows():
+        # Connecting a UDP socket only selects the route; nothing is sent.
+        probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            probe.connect((destination, 9))
+            local = probe.getsockname()[0]
+        except OSError:
+            return None
+        finally:
+            probe.close()
+        return local if usable_ipv4(local) else None
     try:
         result = subprocess.run(
             ["ip", "-4", "route", "get", destination],
@@ -255,6 +314,8 @@ def default_route_source(destination: str) -> str | None:
 def default_stop_container() -> None:
     """Stop the live viewer container (``docker stop gmr-xsens-live``), ignoring failure."""
 
+    if is_windows():  # no container: the Windows viewer is the job's own process
+        return
     try:
         subprocess.run(
             ["docker", "stop", LIVE_CONTAINER],
@@ -274,6 +335,8 @@ def default_display_available(environ: Mapping[str, str] | None = None) -> bool:
     be a file.  An SSH session has no DISPLAY or a forwarded ``host:N`` one.
     """
 
+    if is_windows():  # the console runs in the signed-in desktop session
+        return True
     environ = os.environ if environ is None else environ
     match = _LOCAL_DISPLAY.fullmatch(environ.get("DISPLAY") or "")
     if match is None:
@@ -287,6 +350,8 @@ def default_display_available(environ: Mapping[str, str] | None = None) -> bool:
 def default_viewer_running() -> bool:
     """Whether a ``gmr-xsens-live`` container is running; no Docker counts as no."""
 
+    if is_windows():
+        return False
     try:
         result = subprocess.run(
             ["docker", "ps", "-q", "--filter", f"name=^{LIVE_CONTAINER}$"],
@@ -307,7 +372,8 @@ def default_udp_port_busy(port: int) -> bool:
     try:
         probe.bind(("0.0.0.0", port))
     except OSError as exc:
-        return exc.errno == errno.EADDRINUSE
+        # WSAEACCES (10013): Windows reports an exclusively bound port as access denied.
+        return exc.errno == errno.EADDRINUSE or getattr(exc, "winerror", None) in (10048, 10013)
     finally:
         probe.close()
     return False
@@ -398,6 +464,12 @@ class SetupWorkbench:
     ``display_available``, ``viewer_running`` and ``udp_port_busy`` replace
     the ``ip``, ``docker`` and X11/UDP probes.  Pre-checks (runtime, display,
     leftover viewer, busy port) apply whether or not a command is overridden.
+
+    ``platform`` (default ``sys.platform``) selects the session and command
+    conventions: ``"win32"`` uses forward-slash drive paths, a copied
+    ``session.env`` instead of a symlink, ``venv/Scripts/python.exe``, the
+    Python tools without Docker, and accepts 127.0.0.1 as the Xsens source.
+    How job processes are started and stopped always follows the host OS.
     """
 
     def __init__(
@@ -414,6 +486,7 @@ class SetupWorkbench:
         viewer_running: Callable[[], bool] = default_viewer_running,
         udp_port_busy: Callable[[int], bool] = default_udp_port_busy,
         stop_grace_s: float = 5.0,
+        platform: str | None = None,
     ) -> None:
         self.repo_root = Path(repo_root).expanduser().resolve()
         if not (self.repo_root / "tools" / "xsens" / "live_operator.sh").is_file():
@@ -422,7 +495,10 @@ class SetupWorkbench:
                 "(tools/xsens/live_operator.sh is missing); the Setup workspace "
                 "needs the checkout's tools"
             )
+        self.windows = is_windows(platform)
         self.home = Path(home) if home is not None else Path.home()
+        #: The home folder as the API shows it (forward slashes on Windows).
+        self.home_text = self._text(self.home)
         self.command_overrides = dict(command_overrides or {})
         unknown = set(self.command_overrides) - set(JOB_KINDS)
         if unknown:
@@ -449,32 +525,77 @@ class SetupWorkbench:
     def _stamp(self, fmt: str) -> str:
         return time.strftime(fmt, time.localtime(self._now()))
 
+    def _text(self, path: Path | str) -> str:
+        """A path as session values and the API spell it (forward slashes on Windows)."""
+
+        return Path(path).as_posix() if self.windows else str(path)
+
+    def _tilde(self, path: str) -> str:
+        return _tilde(path, self.home_text, fold_case=self.windows)
+
+    def _is_absolute(self, value: str) -> bool:
+        if not self.windows:
+            return value.startswith("/")
+        # A drive path (C:/...) on Windows; UNC shares (//server/...) are not accepted.
+        return not value.startswith("//") and Path(value).is_absolute()
+
     def _absolute(self, value: str, field_name: str, label: str) -> str:
+        if self.windows:
+            value = value.replace("\\", "/")
         if value == "~":
-            value = str(self.home)
+            value = self.home_text
         elif value.startswith("~/"):
-            value = f"{self.home}/{value[2:]}"
-        if not value.startswith("/"):
-            raise _invalid(f"{label}: use an absolute path (or ~/...)", field_name)
+            value = f"{self.home_text}/{value[2:]}"
+        if not self._is_absolute(value):
+            example = "C:/Users/you/..." if self.windows else "~/..."
+            raise _invalid(f"{label}: use an absolute path (or {example})", field_name)
         if _CONTROL.search(value) or "\n" in value or "\t" in value:
             raise _invalid(f"{label} must not contain control characters", field_name)
         return value
 
     def _ik_config(self, robot: str, mocap_ws: str) -> str:
         if robot == "booster_t1_29dof":
-            return str(self.repo_root / "retarget_configs" / "bvh_xsens_to_booster_t1_29dof.json")
+            return self._text(
+                self.repo_root / "retarget_configs" / "bvh_xsens_to_booster_t1_29dof.json"
+            )
         return f"{mocap_ws}/GMR/general_motion_retargeting/ik_configs/bvh_xsens_to_g1.json"
+
+    def runtime_python(self, mocap_ws: str) -> str:
+        """The GMR runtime venv interpreter inside ``mocap_ws``."""
+
+        if self.windows:
+            return f"{mocap_ws}/venv/Scripts/python.exe"
+        return f"{mocap_ws}/venv/bin/python"
+
+    def _runtime_ready(self, mocap_ws: str) -> bool:
+        return Path(self.runtime_python(mocap_ws)).exists() and (Path(mocap_ws) / "GMR").is_dir()
+
+    def _installer_hint(self, route: str) -> str:
+        if self.windows:
+            return "Run Install-Windows.cmd in the project folder again."
+        return "Run the installer and choose 2 · Recorded." if route == "recorded" else (
+            "Run the installer and choose 1 · Live."
+        )
 
     # ------------------------------------------------------------- session I/O
 
+    def _default_runtime(self) -> str:
+        """``~/mocap-runtime``; on Windows the installer's MOCAP_WS when it set another one."""
+
+        if self.windows:
+            chosen = os.environ.get("MOCAP_WS", "").strip().replace("\\", "/")
+            if chosen and self._is_absolute(chosen):
+                return chosen.rstrip("/")
+        return f"{self.home_text}/mocap-runtime"
+
     def builtin_defaults(self) -> dict[str, Any]:
-        home = str(self.home)
+        home = self.home_text
         return {
             "route": "live",
             "session_dir": "",
             "robot": "unitree_g1",
             "human_height_m": 1.75,
-            "mocap_ws": f"{home}/mocap-runtime",
+            "mocap_ws": self._default_runtime(),
             "motion_bvh": f"{home}/mocap-data/motion.bvh",
             "npose_bvh": f"{home}/mocap-data/neutral.bvh",
             "offsets_file": "",
@@ -484,7 +605,8 @@ class SetupWorkbench:
             "frame_step": 1,
             "npose_start_s": 2.0,
             "npose_duration_s": 1.0,
-            "windows_xsens_ip": "",
+            # A Windows install defaults to Xsens Humanoid on the same PC.
+            "windows_xsens_ip": LOOPBACK_SOURCE if self.windows else "",
             "linux_xsens_ip": "",
         }
 
@@ -511,12 +633,27 @@ class SetupWorkbench:
         return values
 
     def read_session_raw(self) -> dict[str, str] | None:
-        """Return the raw assignments of ``<repo>/session.env``, or ``None``."""
+        """Return the raw assignments of ``<repo>/session.env``, or ``None``.
 
+        On Windows ``<repo>/session.env`` is a copy (symlinks need extra
+        rights there), so the session folder's own ``session.env`` is read
+        when it still exists: a hand edit there is not lost.
+        """
+
+        raw = self._read_env(self.link_path)
+        if raw is None or not self.windows or self.link_path.is_symlink():
+            return raw
+        session_dir = raw.get("SESSION_DIR")
+        if session_dir and self._is_absolute(session_dir):
+            current = self._read_env(Path(session_dir) / "session.env")
+            if current is not None and current.get("SESSION_DIR") == session_dir:
+                return current
+        return raw
+
+    @staticmethod
+    def _read_env(path: Path) -> dict[str, str] | None:
         try:
-            text = self.link_path.read_text(encoding="utf-8", errors="replace")
-        except (FileNotFoundError, NotADirectoryError, IsADirectoryError):
-            return None
+            text = path.read_text(encoding="utf-8", errors="replace")
         except OSError:
             return None
         return parse_session_env(text)
@@ -528,7 +665,7 @@ class SetupWorkbench:
         return self._values_from_env(raw)
 
     def _fresh_session_dir(self) -> str:
-        base = f"{self.home}/mocap-sessions/{self._stamp('%Y-%m-%d-%H%M')}"
+        base = f"{self.home_text}/mocap-sessions/{self._stamp('%Y-%m-%d-%H%M')}"
         candidate, suffix = base, 1
         while os.path.lexists(candidate):
             suffix += 1
@@ -540,7 +677,7 @@ class SetupWorkbench:
 
         values = dict(current) if current is not None else self.builtin_defaults()
         values["session_dir"] = self._fresh_session_dir()
-        if values.get("windows_xsens_ip"):
+        if values.get("windows_xsens_ip") and not self._same_pc(values["windows_xsens_ip"]):
             detected = self._route_source(values["windows_xsens_ip"])
             if detected and usable_ipv4(detected) and detected != values["windows_xsens_ip"]:
                 values["linux_xsens_ip"] = detected
@@ -620,14 +757,20 @@ class SetupWorkbench:
         npose_duration = number("npose_duration_s", "Neutral pose duration")
         if not 0.01 <= npose_duration <= 100000:
             raise _invalid("Neutral pose duration must be at least 0.01 s", "npose_duration_s")
-        windows_ip = text("windows_xsens_ip", "Windows Xsens IP")
-        if windows_ip and not usable_ipv4(windows_ip):
-            raise _invalid("Enter an IPv4 address such as 192.168.1.246", "windows_xsens_ip")
-        linux_ip = text("linux_xsens_ip", "Linux Xsens IP")
+        windows_ip = text("windows_xsens_ip", "Xsens PC IP" if self.windows else "Windows Xsens IP")
+        if windows_ip and not (usable_ipv4(windows_ip) or self._same_pc(windows_ip)):
+            example = "127.0.0.1 (Xsens on this PC) or " if self.windows else ""
+            raise _invalid(f"Enter an IPv4 address such as {example}192.168.1.246",
+                           "windows_xsens_ip")
+        linux_ip = text("linux_xsens_ip", "This PC's IP" if self.windows else "Linux Xsens IP")
         if linux_ip and not usable_ipv4(linux_ip):
             raise _invalid("Enter this PC's IPv4 on the Xsens network", "linux_xsens_ip")
+        if linux_ip and self._same_pc(windows_ip):
+            raise _invalid("Leave this PC's IP empty when Xsens runs on this PC", "linux_xsens_ip")
         if linux_ip and linux_ip == windows_ip:
-            raise _invalid("The Linux IP must differ from the Windows IP", "linux_xsens_ip")
+            message = ("This PC's IP must differ from the Xsens PC IP" if self.windows
+                       else "The Linux IP must differ from the Windows IP")
+            raise _invalid(message, "linux_xsens_ip")
         return {
             "route": route,
             "session_dir": session_dir,
@@ -647,10 +790,15 @@ class SetupWorkbench:
             "linux_xsens_ip": linux_ip,
         }
 
+    def _same_pc(self, source_ip: str) -> bool:
+        """Whether ``source_ip`` means Xsens streams from this PC (Windows installs only)."""
+
+        return self.windows and source_ip == LOOPBACK_SOURCE
+
     def _session_dir_allowed(self, session_dir: str) -> bool:
         """Whether ``session_dir`` resolves inside home and outside the checkout."""
 
-        if not session_dir.startswith("/"):
+        if not self._is_absolute(session_dir):
             return False
         resolved = Path(os.path.realpath(session_dir))
         home = Path(os.path.realpath(self.home))
@@ -698,7 +846,7 @@ class SetupWorkbench:
             raise _invalid("replace must be true or false", "replace")
         values = self.validate(body)
         link = self.link_path
-        if os.path.lexists(link) and not link.is_symlink():
+        if os.path.lexists(link) and not link.is_symlink() and not self._is_console_copy(link):
             raise SetupError(
                 f"{link} exists and is not a link; move it aside and save again",
                 code="session_link_conflict",
@@ -707,7 +855,7 @@ class SetupWorkbench:
         env_file = session_dir / "session.env"
         if env_file.exists() and not replace and not self._is_current(env_file):
             raise SetupError(
-                f"{_tilde(str(env_file), self.home)} exists. Replace it, or choose another folder",
+                f"{self._tilde(self._text(env_file))} exists. Replace it, or choose another folder",
                 code="session_exists",
             )
         try:
@@ -718,7 +866,10 @@ class SetupWorkbench:
             link_temporary = self.repo_root / f".session.env.link-{os.getpid()}"
             if os.path.lexists(link_temporary):
                 link_temporary.unlink()
-            os.symlink(env_file, link_temporary)
+            if self.windows:
+                shutil.copyfile(env_file, link_temporary)
+            else:
+                os.symlink(env_file, link_temporary)
             os.replace(link_temporary, link)
         except OSError as exc:
             raise SetupError(
@@ -729,12 +880,28 @@ class SetupWorkbench:
         return values
 
     def _is_current(self, env_file: Path) -> bool:
+        if self.windows and not self.link_path.is_symlink():
+            raw = self._read_env(self.link_path)
+            folder = raw.get("SESSION_DIR") if raw else None
+            return bool(folder) and Path(folder) / "session.env" == env_file
         try:
             return os.path.realpath(self.link_path) == os.path.realpath(env_file) and (
                 self.link_path.exists()
             )
         except OSError:
             return False
+
+    def _is_console_copy(self, path: Path) -> bool:
+        """Whether ``path`` is a Windows session.env copy written by this console."""
+
+        if not self.windows:
+            return False
+        try:
+            with path.open("r", encoding="utf-8", errors="replace") as handle:
+                first = handle.readline()
+        except OSError:
+            return False
+        return first.startswith("# Mocap session created ") and "operator console" in first
 
     # ---------------------------------------------------------------- payload
 
@@ -775,19 +942,25 @@ class SetupWorkbench:
         session = self.current_session()
         windows_ip = session["windows_xsens_ip"] if session else ""
         linux_ip = session["linux_xsens_ip"] if session else ""
-        detected = self._route_source(windows_ip) if windows_ip else None
         reference = session if session is not None else self.builtin_defaults()
-        mocap_ws = Path(reference["mocap_ws"])
+        same_pc = self._same_pc(reference["windows_xsens_ip"])
+        detected = (
+            self._route_source(windows_ip) if windows_ip and not self._same_pc(windows_ip) else None
+        )
         display = bool(self._display_available())
         firewall = None
-        if windows_ip and linux_ip:
+        if windows_ip and linux_ip and not self.windows:
             firewall = (
                 f"sudo ufw allow from {windows_ip} to {linux_ip} port {XSENS_UDP_PORT} proto udp"
             )
+        runtime_ready = self._runtime_ready(reference["mocap_ws"])
         return {
-            "repo_root": _tilde(str(self.repo_root), self.home),
+            "platform": "windows" if self.windows else "linux",
+            "repo_root": self._tilde(self._text(self.repo_root)),
             # Lets the UI show paths under the home folder as ~/... (inputs accept both).
-            "home": str(self.home),
+            "home": self.home_text,
+            # Xsens Humanoid streams to 127.0.0.1 on this (Windows) PC.
+            "xsens_on_this_pc": same_pc,
             "session": session,
             "defaults": self.new_session_defaults(session),
             "network": {
@@ -798,8 +971,9 @@ class SetupWorkbench:
             "stream_check_s": stream_check_seconds(),
             "readiness": {
                 "live_image": None,
-                "recorded_runtime": (mocap_ws / "venv" / "bin" / "python").exists()
-                and (mocap_ws / "GMR").is_dir(),
+                # On Windows the live viewer runs from the same runtime as recorded jobs.
+                "live_runtime": runtime_ready if self.windows else None,
+                "recorded_runtime": runtime_ready,
                 "motion_bvh": Path(reference["motion_bvh"]).is_file(),
                 "npose_bvh": Path(reference["npose_bvh"]).is_file(),
                 "display": display,
@@ -864,6 +1038,12 @@ class SetupWorkbench:
         env = dict(os.environ)
         env.update({key: value for key, value in raw.items() if key in SESSION_KEYS})
         env["PYTHONUNBUFFERED"] = "1"
+        if os.name == "nt":
+            # Job output is read as UTF-8; a pipe would otherwise use the ANSI code page.
+            env["PYTHONIOENCODING"] = "utf-8"
+            # EGL/OSMesa exist only on Linux; MuJoCo raises for them on Windows.
+            if env.get("MUJOCO_GL", "").lower() in ("egl", "osmesa"):
+                del env["MUJOCO_GL"]
         # Tools that call python3 (live_operator.sh) get the console's own interpreter.
         interpreter_dir = os.path.dirname(sys.executable)
         env["PATH"] = os.pathsep.join(
@@ -924,17 +1104,22 @@ class SetupWorkbench:
             raise SetupError(SESSION_DIR_LOCATION_MESSAGE, code="invalid_session_dir")
         if kind in ("acceptance", "live") and not session["windows_xsens_ip"]:
             raise SetupError(
-                "Enter the Windows Xsens IP in the session first",
+                "Choose where Xsens runs (this PC or its IP) in the session first"
+                if self.windows else "Enter the Windows Xsens IP in the session first",
                 code="missing_windows_ip",
             )
-        if kind in ("retarget", "render") or (kind == "doctor" and session["route"] == "recorded"):
-            runtime_python = Path(session["mocap_ws"]) / "venv" / "bin" / "python"
-            if not runtime_python.exists():
-                raise SetupError(
-                    f"Recorded runtime not found in {_tilde(session['mocap_ws'], self.home)}. "
-                    "Run the installer and choose 2 · Recorded.",
-                    code="recorded_runtime_missing",
-                )
+        needs_runtime = kind in ("retarget", "render") or (
+            kind == "doctor" and session["route"] == "recorded"
+        )
+        if self.windows and kind == "live":
+            needs_runtime = True  # no Docker image: the viewer runs from the runtime venv
+        if needs_runtime and not Path(self.runtime_python(session["mocap_ws"])).exists():
+            label = "Runtime" if self.windows else "Recorded runtime"
+            raise SetupError(
+                f"{label} not found in {self._tilde(session['mocap_ws'])}. "
+                + self._installer_hint(session["route"]),
+                code="recorded_runtime_missing",
+            )
         if kind in ("live", "render") and not self._display_available():
             raise SetupError(NO_DISPLAY_HINT, code="no_display")
         self._require_no_running_job()
@@ -1093,7 +1278,7 @@ class SetupWorkbench:
                     stdin=subprocess.DEVNULL,
                     stdout=stdout_handle if stdout_handle is not None else subprocess.PIPE,
                     stderr=subprocess.PIPE if stdout_handle is not None else subprocess.STDOUT,
-                    start_new_session=True,
+                    **_new_process_group(),
                 )
                 job.process = process
         except OSError as exc:
@@ -1116,6 +1301,9 @@ class SetupWorkbench:
     def _display_command(self, argv: list[str]) -> str:
         """Shell-quoted command line with home-folder paths shown as ``~/...``."""
 
+        if self.windows:
+            shown = [self._tilde(arg.replace("\\", "/")) for arg in argv]
+            return subprocess.list2cmdline(shown)
         home = str(self.home).rstrip("/") + "/"
         return " ".join(
             "~/" + shlex.quote(arg[len(home):]) if arg.startswith(home) and len(arg) > len(home)
@@ -1129,6 +1317,8 @@ class SetupWorkbench:
         def default() -> list[str]:
             doctor = str(self.repo_root / "tools" / "checks" / "setup_doctor.py")
             if session["route"] == "live":
+                if self.windows:
+                    return [sys.executable, doctor, "live", "--workspace", session["mocap_ws"]]
                 return [sys.executable, doctor, "live"]
             return [sys.executable, doctor, "recorded", "--workspace", session["mocap_ws"],
                     "--robot", session["robot"]]
@@ -1144,13 +1334,17 @@ class SetupWorkbench:
         output = job.session_dir / f"stream-acceptance-{self._stamp('%Y%m%d-%H%M%S')}.json"
         job.outputs.append(output)
 
+        env = self._session_env(raw)
+
         def default() -> list[str]:
+            if self.windows:
+                return self.acceptance_argv(session, env, output)
             return [str(self.repo_root / "tools" / "xsens" / "live_operator.sh"), "acceptance",
                     "--output", str(output)]
 
         # An override receives the report path as options["output"].
         argv = self._argv("acceptance", session, {**options, "output": str(output)}, default)
-        code = self._run_process(job, argv, self._session_env(raw))
+        code = self._run_process(job, argv, env)
         verdict = None
         try:
             report = json.loads(output.read_text(encoding="utf-8"))
@@ -1170,24 +1364,60 @@ class SetupWorkbench:
         passed = code == 0 and (verdict is None or verdict == "PASS")
         return code, passed
 
-    def _run_live(self, job, session, raw, options) -> tuple[int, bool]:
-        def default() -> list[str]:
-            argv = [str(self.repo_root / "tools" / "xsens" / "live_operator.sh"), "gmr",
-                    "--robot", session["robot"],
-                    "--human-height", _format_number(session["human_height_m"])]
-            if options["calibrate_after_s"] is not None:
-                argv += ["--calibrate-after", _format_number(options["calibrate_after_s"])]
-            if options["record_video"]:
-                argv.append("--record-video")
-            return argv
+    def _live_video(self, session: Mapping[str, Any], env: Mapping[str, str]) -> Path:
+        """Where the live viewer records (docker/gmr-live/run.sh mounts this folder)."""
 
-        env = self._session_env(raw)
-        code = self._run_process(job, self._argv("live", session, options, default), env)
+        runtime_root = Path(env.get("GMR_LIVE_RUNTIME_ROOT")
+                            or self.repo_root / "artifacts" / "xsens-live")
+        short = "t1" if session["robot"] == "booster_t1_29dof" else "g1"
+        return runtime_root / f"{short}-live.mp4"
+
+    def acceptance_argv(self, session: Mapping[str, Any], env: Mapping[str, str],
+                        output: Path) -> list[str]:
+        """The Windows stream check: live_operator.sh acceptance without bash."""
+
+        port = env.get("XSENS_UDP_PORT") or XSENS_UDP_PORT
+        return [
+            sys.executable, str(self.repo_root / "tools" / "xsens" / "stream_acceptance.py"),
+            "--bind", "0.0.0.0", "--port", port,
+            "--expected-source", session["windows_xsens_ip"],
+            "--duration", str(stream_check_seconds(env)),
+            *ACCEPTANCE_LIMITS,
+            "--output", str(output),
+        ]
+
+    def live_argv(self, session: Mapping[str, Any], options: Mapping[str, Any],
+                  env: Mapping[str, str]) -> list[str]:
+        """The live viewer command: Docker on Linux, the runtime venv on Windows."""
+
+        if self.windows:
+            argv = [
+                self.runtime_python(session["mocap_ws"]),
+                str(self.repo_root / "tools" / "xsens" / "live_g1_sim.py"),
+                "--port", env.get("XSENS_UDP_PORT") or XSENS_UDP_PORT,
+                "--source-ip", session["windows_xsens_ip"],
+                "--video-path", str(self._live_video(session, env)),
+            ]
+        else:
+            argv = [str(self.repo_root / "tools" / "xsens" / "live_operator.sh"), "gmr"]
+        argv += ["--robot", session["robot"],
+                 "--human-height", _format_number(session["human_height_m"])]
+        if options["calibrate_after_s"] is not None:
+            argv += ["--calibrate-after", _format_number(options["calibrate_after_s"])]
         if options["record_video"]:
-            runtime_root = Path(env.get("GMR_LIVE_RUNTIME_ROOT")
-                                or self.repo_root / "artifacts" / "xsens-live")
-            short = "t1" if session["robot"] == "booster_t1_29dof" else "g1"
-            video = runtime_root / f"{short}-live.mp4"
+            argv.append("--record-video")
+        return argv
+
+    def _run_live(self, job, session, raw, options) -> tuple[int, bool]:
+        env = self._session_env(raw)
+        video = self._live_video(session, env)
+        if self.windows and options["record_video"]:
+            video.parent.mkdir(parents=True, exist_ok=True)
+        code = self._run_process(
+            job, self._argv("live", session, options, lambda: self.live_argv(session, options, env)),
+            env,
+        )
+        if options["record_video"]:
             try:
                 fresh = video.is_file() and video.stat().st_mtime >= job.wall_started_at
             except OSError:
@@ -1248,7 +1478,7 @@ class SetupWorkbench:
         def default() -> list[str]:
             mocap_ws = session["mocap_ws"]
             argv = [
-                f"{mocap_ws}/venv/bin/python",
+                self.runtime_python(mocap_ws),
                 str(self.repo_root / "tools" / "retarget" / "retarget_robot_recorded.py"),
                 "--gmr-root", f"{mocap_ws}/GMR", "--robot", robot,
                 "--ik-config", self._ik_config(robot, mocap_ws),
@@ -1293,7 +1523,7 @@ class SetupWorkbench:
         def default() -> list[str]:
             mocap_ws = session["mocap_ws"]
             argv = [
-                f"{mocap_ws}/venv/bin/python",
+                self.runtime_python(mocap_ws),
                 str(self.repo_root / "tools" / "retarget" / "render_robot_motion.py"),
                 "--gmr-root", f"{mocap_ws}/GMR", "--robot", robot,
                 "--motion", f"{folder}/{robot}-{options['motion']}.pkl", "--loops", "1",
@@ -1311,6 +1541,7 @@ class SetupWorkbench:
         report_file = job.session_dir / "core-doctor.json"
         job.outputs += [revision_file, report_file]
         job.append("$ git rev-parse HEAD")
+        failure: str | None = None
         try:
             result = subprocess.run(
                 ["git", "rev-parse", "HEAD"],
@@ -1321,12 +1552,20 @@ class SetupWorkbench:
                 check=False,
             )
         except (OSError, subprocess.SubprocessError) as exc:
-            job.append(f"ERROR: git rev-parse failed: {exc}")
-            return 1, False
-        revision = result.stdout.strip()
-        if result.returncode != 0 or not revision:
-            job.append(f"ERROR: git rev-parse failed: {strip_ansi(result.stderr.strip())}")
-            return result.returncode or 1, False
+            failure, code = str(exc), 1
+        else:
+            revision = result.stdout.strip()
+            if result.returncode != 0 or not revision:
+                failure = strip_ansi(result.stderr.strip())
+                code = result.returncode or 1
+        if failure is not None:
+            # A GitHub "Download ZIP" has no .git; its .git_archival.txt names the commit.
+            archived = self.archive_revision()
+            if archived is None:
+                job.append(f"ERROR: git rev-parse failed: {failure}")
+                return code, False
+            revision = archived
+            job.append(f"No Git checkout; revision {revision} from .git_archival.txt")
         revision_file.write_text(revision + "\n", encoding="utf-8")
         job.append(f"Project revision {revision} -> {revision_file.name}")
 
@@ -1355,10 +1594,23 @@ class SetupWorkbench:
             job.append(f"FAIL: core check is {state}; saved {report_file.name}")
         return code, code == 0
 
+    def archive_revision(self) -> str | None:
+        """The commit recorded in ``.git_archival.txt`` by ``git archive``, or ``None``."""
+
+        try:
+            text = (self.repo_root / ".git_archival.txt").read_text(encoding="utf-8")
+        except OSError:
+            return None
+        match = _ARCHIVE_REVISION.search(text)
+        return match.group(1) if match else None
+
     # ------------------------------------------------------------------- stop
 
     def stop_job(self, job_id: str, *, wait: bool = False) -> dict[str, Any]:
         """Request a stop: SIGINT, then SIGTERM, then SIGKILL the job's process group.
+
+        On Windows: CTRL_BREAK (the job scripts treat SIGBREAK like SIGINT),
+        then ``taskkill /T /F`` for the process tree.
 
         The termination sequence runs on a background thread and the summary
         is returned at once (its state may still be ``running``; it becomes
@@ -1390,6 +1642,10 @@ class SetupWorkbench:
         return job.summary_dict()
 
     def _terminate(self, job: _Job, process: subprocess.Popen) -> None:
+        if os.name == "nt":
+            self._terminate_windows(job, process)
+            return
+
         def signal_group(signum: int) -> None:
             try:
                 os.killpg(process.pid, signum)
@@ -1418,12 +1674,64 @@ class SetupWorkbench:
         signal_group(signal.SIGKILL)
         exited(self.stop_grace_s)
 
+    def _terminate_windows(self, job: _Job, process: subprocess.Popen) -> None:
+        """CTRL_BREAK the job's process group, then kill its process tree.
+
+        CTRL_BREAK reaches the job only through a console it shares with this
+        server, which is why the Windows launcher gives the console a hidden one.
+        A venv's ``Scripts\\python.exe`` is a launcher that runs the real
+        interpreter as its child, so the fallback is ``taskkill /T`` while the
+        launcher is still alive: terminating the launcher alone would orphan the
+        job, which would keep the UDP port and the output pipe.
+        """
+
+        def exited(timeout: float) -> bool:
+            try:
+                process.wait(timeout=timeout)
+                return True
+            except subprocess.TimeoutExpired:
+                return False
+
+        if process.poll() is not None:
+            return
+        try:
+            os.kill(process.pid, signal.CTRL_BREAK_EVENT)  # type: ignore[attr-defined]
+        except OSError:
+            pass
+        else:
+            if exited(self.stop_grace_s):
+                return
+        try:
+            subprocess.run(
+                ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                capture_output=True,
+                timeout=20,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            pass
+        if exited(self.stop_grace_s):
+            return
+        try:
+            process.kill()
+        except OSError:
+            pass
+        exited(self.stop_grace_s)
+
     def shutdown(self) -> None:
         """Stop any running job; called on console shutdown."""
 
         job = self.running_job()
         if job is not None:
             self.stop_job(job.id, wait=True)
+
+
+def _new_process_group() -> dict[str, Any]:
+    """Popen arguments that put a job in its own process group on this OS."""
+
+    if os.name == "nt":
+        return {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}  # type: ignore[attr-defined]
+    return {"start_new_session": True}
 
 
 def stream_check_seconds(environ: Mapping[str, str] | None = None) -> int:
@@ -1478,10 +1786,12 @@ def require_setup_mode(*, playback: bool, simulation: bool) -> None:
 
 __all__ = [
     "JOB_KINDS",
+    "LOOPBACK_SOURCE",
     "SESSION_KEYS",
     "SetupError",
     "SetupWorkbench",
     "parse_session_env",
+    "is_windows",
     "require_setup_mode",
     "strip_ansi",
     "usable_ipv4",

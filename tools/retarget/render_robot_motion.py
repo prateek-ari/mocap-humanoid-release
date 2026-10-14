@@ -16,6 +16,7 @@ from dataclasses import dataclass
 import os
 from pathlib import Path
 import pickle
+import signal
 import sys
 from typing import Any
 
@@ -358,6 +359,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if hasattr(signal, "SIGBREAK"):  # Windows Ctrl+Break -> same path as Ctrl+C
+        signal.signal(signal.SIGBREAK, signal.default_int_handler)
     try:
         gmr_root = args.gmr_root.expanduser().resolve()
         motion_path = args.motion.expanduser().resolve()

@@ -17,6 +17,7 @@ from pathlib import Path
 import pickle
 import re
 import shutil
+import signal
 import sys
 import tempfile
 import time
@@ -755,6 +756,8 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Iterable[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    if hasattr(signal, "SIGBREAK"):  # Windows Ctrl+Break -> same path as Ctrl+C
+        signal.signal(signal.SIGBREAK, signal.default_int_handler)
     try:
         if args.frame_step <= 0:
             raise RetargetError("--frame-step must be a positive integer")
