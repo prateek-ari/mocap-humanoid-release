@@ -237,9 +237,14 @@ fi
 
 if (( ! dry_run )); then
   stage='project revision'
-  git -C "$repo_root" rev-parse --short HEAD | while IFS= read -r revision; do
-    printf 'Project revision: %s\n' "$revision"
-  done
+  revision=''
+  if [[ -e $repo_root/.git ]]; then
+    revision=$(git -C "$repo_root" rev-parse --short HEAD)
+  elif [[ -r $repo_root/.git_archival.txt ]]; then
+    # A GitHub "Download ZIP" has no .git; its .git_archival.txt names the commit.
+    revision=$(sed -n 's/^node: \([0-9a-f]\{7\}\).*/\1 (ZIP download)/p' "$repo_root/.git_archival.txt")
+  fi
+  printf 'Project revision: %s\n' "${revision:-unknown (no Git checkout)}"
 else
   printf 'Dry run: no commands will execute. Project revision command: git -C %q rev-parse --short HEAD\n' "$repo_root"
 fi
