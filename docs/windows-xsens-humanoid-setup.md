@@ -88,8 +88,12 @@ The UDP port and protocol are fixed; DHCP host addresses are confirmed per sessi
 
 In Xsens Humanoid, open **Options -> Network Streamer**, select the ROS preset, and set its
 destination to the detected Linux Xsens-facing IPv4, UDP `5555`. The preset must emit both the 23-segment
-**Position + Orientation (Quaternion)** body stream (MXTP02) and the 22-joint joint-angle stream
-(MXTP20). Disable prop and finger segments in MXTP02 so the body packet retains the strict
+**Position + Orientation (Quaternion)** body stream (MXTP02) and joint angles
+(MXTP20). The supported Xsens 2026.9 joint stream contains the 22 body-tree
+connections plus six additional angle records; the decoder preserves the
+connection-point IDs. Legacy 22-record synthetic streams remain supported.
+See the [real-stream commissioning record](live-xsens-commissioning-2026-10-14.md).
+Disable prop and finger segments in MXTP02 so the body packet retains the strict
 23-segment layout required by the acceptance and GMR paths.
 
 Xsens's ROS 2 guide mentions `9736`, while the pinned upstream ROS driver defaults to `9763`. Those

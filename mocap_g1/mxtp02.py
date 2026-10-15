@@ -33,6 +33,28 @@ XSENS_JOINT_SEGMENT_PAIRS = (
     (1, 20), (20, 21), (21, 22), (22, 23),
 )
 
+# MXTP20 endpoint fields are point IDs encoded as
+# ``256 * segment_id + segment-local point_id``. These observed local IDs name
+# the endpoints for the canonical 22-joint body tree. Legacy synthetic packets
+# use local point zero at both ends instead.
+XSENS_MXTP20_BODY_CONNECTIONS = (
+    (1, 2, 2, 1), (2, 2, 3, 1), (3, 2, 4, 1), (4, 2, 5, 1),
+    (5, 2, 6, 1), (6, 2, 7, 1), (5, 3, 8, 1), (8, 2, 9, 1),
+    (9, 2, 10, 1), (10, 2, 11, 1), (5, 4, 12, 1), (12, 2, 13, 1),
+    (13, 2, 14, 1), (14, 2, 15, 1), (1, 3, 16, 1), (16, 2, 17, 1),
+    (17, 2, 18, 1), (18, 2, 19, 1), (1, 4, 20, 1), (20, 2, 21, 1),
+    (21, 2, 22, 1), (22, 2, 23, 1),
+)
+
+# Six extra records were observed after the canonical tree in an Xsens Humanoid
+# 2026.9 stream capture. The published protocol defines the MXTP20 record and
+# point-ID encoding, but does not specify this suffix; keep the captured IDs
+# explicit so unrelated or malformed records remain rejected.
+XSENS_MXTP20_EXTENDED_CONNECTIONS = (
+    (5, 0, 7, 0), (5, 0, 13, 0), (5, 0, 9, 0),
+    (1, 0, 5, 0), (1, 0, 1, 0), (1, 0, 5, 0),
+)
+
 
 class ProtocolError(ValueError):
     """Raised when a body datagram violates the expected MXTP02 contract."""
@@ -73,6 +95,8 @@ class JointAngle:
     parent_segment_id: int
     child_segment_id: int
     rotation_xyz_deg: tuple[float, float, float]
+    parent_point_id: int = 0
+    child_point_id: int = 0
 
 
 @dataclass(frozen=True)
@@ -138,8 +162,8 @@ def build_joint_angles_datagram(
 ) -> bytes:
     """Encode one complete 22-joint MXTP20 datagram.
 
-    Connection identifiers use point ID zero, so their wire value is
-    ``256 * segment_id``. Rotations are the protocol's XYZ degrees.
+    This synthetic encoder retains the legacy point-zero connection IDs, so
+    their wire value is ``256 * segment_id``. Rotations are protocol XYZ degrees.
     """
     count = len(XSENS_JOINT_SEGMENT_PAIRS)
     if len(rotations_xyz_deg) != count:
@@ -223,7 +247,7 @@ def parse_body_datagram(data: bytes, *, strict: bool = True) -> BodyDatagram:
 
 
 def parse_joint_angles_datagram(data: bytes, *, strict: bool = True) -> JointAnglesDatagram:
-    """Decode one MXTP20 packet and validate the canonical body tree."""
+    """Decode MXTP20 and validate a supported complete body-angle layout."""
     if len(data) < HEADER_STRUCT.size:
         raise ProtocolError("datagram is shorter than the 24-byte MXTP20 header")
     (
@@ -243,10 +267,17 @@ def parse_joint_angles_datagram(data: bytes, *, strict: bool = True) -> JointAng
         raise ProtocolError(f"unexpected message id {message_id!r}")
     if strict and datagram_counter != DATAGRAM_COUNTER_SINGLE:
         raise ProtocolError("interleaved/multipart MXTP20 datagrams are not accepted")
-    if strict and item_count != len(XSENS_JOINT_SEGMENT_PAIRS):
-        raise ProtocolError("expected one complete 22-joint angle frame")
-    if strict and (body_count or prop_count or finger_count or reserved):
-        raise ProtocolError("MXTP20 reserved header fields must be zero")
+    if strict and item_count not in (
+        len(XSENS_JOINT_SEGMENT_PAIRS),
+        len(XSENS_JOINT_SEGMENT_PAIRS) + len(XSENS_MXTP20_EXTENDED_CONNECTIONS),
+    ):
+        raise ProtocolError("expected one complete 22-joint or supported 28-record MXTP20 frame")
+    # The protocol specifies 23 body segments in every packet type. The old
+    # synthetic zero-point layout also used zero, so preserve that one profile.
+    if strict and body_count not in (0, len(XSENS_SEGMENTS)):
+        raise ProtocolError("MXTP20 body segment count must be zero or 23")
+    if strict and (prop_count or finger_count or reserved):
+        raise ProtocolError("MXTP20 props, fingers, and reserved header fields must be zero")
     expected_payload = item_count * JOINT_ANGLE_STRUCT.size
     if payload_size != expected_payload:
         raise ProtocolError(
@@ -263,17 +294,63 @@ def parse_joint_angles_datagram(data: bytes, *, strict: bool = True) -> JointAng
     for index in range(item_count):
         parent, child, rx, ry, rz = JOINT_ANGLE_STRUCT.unpack_from(data, offset)
         offset += JOINT_ANGLE_STRUCT.size
-        if parent % 256 or child % 256:
-            raise ProtocolError("only zero-point connection identifiers are supported")
-        parent_id, child_id = parent // 256, child // 256
-        if strict and (parent_id, child_id) != XSENS_JOINT_SEGMENT_PAIRS[index]:
-            raise ProtocolError(
-                f"joint {index + 1} has connection {parent_id}->{child_id}; "
-                f"expected {XSENS_JOINT_SEGMENT_PAIRS[index][0]}->"
-                f"{XSENS_JOINT_SEGMENT_PAIRS[index][1]}"
-            )
+        parent_id, parent_point_id = divmod(parent, 256)
+        child_id, child_point_id = divmod(child, 256)
+        if not 1 <= parent_id <= len(XSENS_SEGMENTS):
+            raise ProtocolError(f"joint {index + 1} parent segment id {parent_id} is outside the body model")
+        if not 1 <= child_id <= len(XSENS_SEGMENTS):
+            raise ProtocolError(f"joint {index + 1} child segment id {child_id} is outside the body model")
         rotation = (rx, ry, rz)
         if not all(math.isfinite(value) for value in rotation):
             raise ProtocolError(f"joint {index + 1} contains non-finite values")
-        joints.append(JointAngle(parent_id, child_id, rotation))
+        joints.append(JointAngle(
+            parent_id,
+            child_id,
+            rotation,
+            parent_point_id,
+            child_point_id,
+        ))
+
+    if strict:
+        connections = tuple(
+            (
+                joint.parent_segment_id,
+                joint.parent_point_id,
+                joint.child_segment_id,
+                joint.child_point_id,
+            )
+            for joint in joints
+        )
+        legacy_connections = tuple(
+            (parent_id, 0, child_id, 0)
+            for parent_id, child_id in XSENS_JOINT_SEGMENT_PAIRS
+        )
+        current_connections = XSENS_MXTP20_BODY_CONNECTIONS
+        if item_count == len(XSENS_JOINT_SEGMENT_PAIRS):
+            valid_layouts = (legacy_connections, current_connections)
+        else:
+            valid_layouts = (
+                current_connections + XSENS_MXTP20_EXTENDED_CONNECTIONS,
+            )
+        if connections not in valid_layouts:
+            expected_layout = min(
+                valid_layouts,
+                key=lambda layout: sum(
+                    actual != expected for actual, expected in zip(connections, layout)
+                ),
+            )
+            mismatch = next(
+                index
+                for index, (actual, expected) in enumerate(zip(connections, expected_layout))
+                if actual != expected
+            )
+            expected = expected_layout[mismatch]
+            actual = connections[mismatch]
+            raise ProtocolError(
+                f"joint {mismatch + 1} has connection "
+                f"{actual[0]}.{actual[1]}->{actual[2]}.{actual[3]}; expected "
+                f"{expected[0]}.{expected[1]}->{expected[2]}.{expected[3]}"
+            )
+        if body_count == 0 and connections != legacy_connections:
+            raise ProtocolError("MXTP20 body segment count must be 23 for point-based layouts")
     return JointAnglesDatagram(sample_counter, time_code, tuple(joints), character_id)

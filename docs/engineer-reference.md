@@ -387,7 +387,7 @@ In every mode hardware authority stays locked; the console never connects to a r
 | No UDP traffic | Active preview/playback, destination, port, Ethernet link, route and scoped firewall | Correct the Windows destination/source filter; acceptance must pass. Ping alone is insufficient. |
 | Only MXTP12/MXTP13 | Streamer is sending metadata/scaling | Enable body quaternion and joint streams and start actual preview/playback. |
 | Unexpected source / no accepted frames | DHCP changed Windows IP or wrong adapter selected | Update the Windows IP in Setup → 03 Session (or rerun `new_session.sh`); rerun the stream check. |
-| Bad segment count or joint pairing | Props/fingers, wrong preset, multiple actors or missing MXTP20 | Send strict 23-body/22-joint single-character streams; rerun acceptance. |
+| Bad segment count or joint pairing | Props/fingers, wrong preset, multiple actors, missing MXTP20 or an unsupported connection layout | Send 23 body segments and paired joint angles for one character; the decoder supports the observed Xsens 2026.9 28-record layout and legacy 22-record streams. Rerun acceptance; see the [commissioning record](live-xsens-commissioning-2026-10-14.md). |
 | Rate/loss gate fails | Capture FPS, LAN congestion and machine load | Use the wired capture LAN; reduce load; keep the thresholds and repeat a full test. |
 | `Address already in use` | `ss -lunp` and known Docker receivers | Stop the previous listener; verify the port is free; run one receiver. |
 | Docker permission denied | Normal-user Docker access | Follow Docker's post-install access steps, log in again, verify `docker info`. |

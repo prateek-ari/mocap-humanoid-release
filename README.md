@@ -65,6 +65,8 @@ When the installer finishes, it opens the **Setup console** in your browser. Aft
 
 The Setup console walks you through every step with buttons: enter the session details, check the suit's stream, start the live simulation, or turn a recording into a video.
 
+**G1 and T1 side by side:** to drive both robots from one suit in one window, load your saved session and run `bash docker/gmr-live/run-compare.sh --calibrate-after 5` from the project folder. Step 07 of the setup guide has the exact commands.
+
 ## Guides
 
 - **[Windows app guide](docs/windows-app.md)**: install and use the Windows app, and fix common problems.

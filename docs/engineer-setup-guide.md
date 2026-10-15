@@ -164,6 +164,20 @@ Open **07 Live simulation**. It shows the robot and height from your session.
 
 ![Step 07: the live simulation running with auto-calibration; MuJoCo window keys below](engineer-guide-assets/setup-07-live.png)
 
+To show **G1 and T1 side by side in one window**, stop the single-robot viewer
+first, then run these commands from the repository root:
+
+```bash
+source session.env
+bash docker/gmr-live/run-compare.sh --calibrate-after 5
+```
+
+Keep Windows streaming and stand still with arms down for the first five
+seconds. Both robots use the same received frame and calibrate automatically.
+The comparison currently starts from the terminal, rather than the Setup
+console's single-robot button. See [what changed and why](live-xsens-commissioning-2026-10-14.md)
+and the [offline block diagram](live-xsens-g1-t1-diagram.html).
+
 Keys in the MuJoCo window (click it first):
 
 - **Space** turns arm and waist tracking on or off.
