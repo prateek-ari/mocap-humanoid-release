@@ -59,7 +59,9 @@ The installer also adds **Mocap Setup** to your applications menu. From now on, 
 
 ### Docker and NVIDIA (live route)
 
-Install these before choosing **1 · Live**, using the official instructions:
+**Easiest:** run `bash install-ubuntu.sh` from the project folder instead of the commands above. It checks the NVIDIA driver, Docker, the NVIDIA Container Toolkit and the project, and installs only what is missing (restart and run it again if it installs the driver). `bash install-ubuntu.sh --check` only reports.
+
+To install them by hand instead, do this before choosing **1 · Live**, using the official instructions:
 
 1. A working NVIDIA driver: `nvidia-smi` lists your GPU.
 2. [Docker Engine for Ubuntu](https://docs.docker.com/engine/install/ubuntu/). Then let your user run Docker without sudo, and log out and in again.

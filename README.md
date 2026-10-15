@@ -51,13 +51,15 @@ Xsens Humanoid stays on its Windows PC and streams to an Ubuntu PC that runs the
 
 ### Install
 
-On the Ubuntu PC, open a terminal and paste this line. Press **Enter** to accept each suggested answer:
+On the Ubuntu PC, open a terminal and paste this line:
 
 ```bash
-sudo apt-get update && sudo apt-get install -y git && git clone https://github.com/prateek-ari/mocap-humanoid-release.git && cd mocap-humanoid-release && bash tools/setup/install.sh
+sudo apt-get update && sudo apt-get install -y git && git clone https://github.com/prateek-ari/mocap-humanoid-release.git && cd mocap-humanoid-release && bash install-ubuntu.sh
 ```
 
-For the live route, Docker and NVIDIA support must be installed first. The setup guide (step 02) explains how.
+Already downloaded the project? Run `bash install-ubuntu.sh` from its folder.
+
+The script checks the PC and installs only what is missing: the NVIDIA driver, Docker, the NVIDIA Container Toolkit and the project itself. If it installs the NVIDIA driver, it asks you to restart: run the same command again after the restart. Run it from a terminal on the PC's desktop, not over SSH. `bash install-ubuntu.sh --check` only reports what is missing.
 
 ### Use it
 
