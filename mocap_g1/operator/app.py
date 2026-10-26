@@ -788,7 +788,7 @@ def create_app(
             return _FrameDenyHeaders(super().build_middleware_stack())
 
     app = _OperatorConsoleApp(
-        title="Mocap G1 Operator Console",
+        title="Mocap Operator Console",
         version=service_version(),
         docs_url="/api/docs",
         redoc_url=None,
@@ -1265,7 +1265,7 @@ def create_app(
         @app.get("/")
         async def service_description():
             return {
-                "service": "Mocap G1 Operator Console",
+                "service": "Mocap Operator Console",
                 "api": "/api/v1/status",
                 "documentation": "/api/docs",
                 "ui": "Static console assets are not installed",

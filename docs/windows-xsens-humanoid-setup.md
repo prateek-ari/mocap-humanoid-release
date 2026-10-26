@@ -10,7 +10,7 @@ Windows capture PC (licensed)                 Linux/GMR receiver (unlicensed)
 source IPv4 confirmed per session             destination IPv4 detected per session
 Xsens Humanoid + MVN Link
         |-- ROS preset, UDP 5555 ------------> acceptance -> ROS 2 -> GMR/MuJoCo
-        `-- .mvn recording -> 3DS Max BVH ---> offline G1 retargeting
+        `-- .mvn recording -> 3DS Max BVH ---> offline robot retargeting
 ```
 
 ## Licence boundary
@@ -155,8 +155,8 @@ tools/xsens/live_operator.sh ros2
    `/tf`, `/com`, and `/diagnostics` traffic before stopping the ROS container. The ROS node does
    not filter source IP, so retain the scoped firewall rule or equivalent network isolation.
 3. Run `gmr` only after ROS has exited. It filters for the explicit `XSENS_SOURCE_IP`, ignores the paired
-   MXTP20 packets, keeps the newest valid MXTP02 frame, retargets to `unitree_g1`, and opens the
-   MuJoCo viewer through host X11/NVIDIA.
+   MXTP20 packets, keeps the newest valid MXTP02 frame, retargets to the selected robot (`booster_k1` by default),
+   and opens the MuJoCo viewer through host X11/NVIDIA.
 
 Inspect ROS traffic from another terminal with, for example:
 
@@ -171,7 +171,7 @@ measured performer height:
 
 ```bash
 HUMAN_HEIGHT_M=1.75  # example only; replace with the measured height
-ROBOT=unitree_g1     # or booster_t1_29dof
+ROBOT=booster_k1     # the default; or unitree_g1, booster_t1_29dof
 tools/xsens/live_operator.sh gmr --robot "$ROBOT" --human-height "$HUMAN_HEIGHT_M"
 ```
 
@@ -259,7 +259,7 @@ export and the actor/body-dimension provenance.
 3. Preserve the export units and note them in the job metadata. The current centimetre-based path
    uses a `0.01` scale.
 4. Transfer the BVH to the external runtime/data workspace, not into Git.
-5. Review and save the complete Xsens-to-G1 offsets calibration before producing deliverable
+5. Review and save the complete Xsens-to-robot offsets calibration before producing deliverable
    output. Zero or missing offsets are only sufficient for structural smoke tests.
 6. Retarget and render the take from the Setup console (setup guide steps 08–10), then visually
    review the source and robot motion together.
@@ -278,7 +278,7 @@ Capture the following without licence secrets or personal data:
 - calibration result and test-take names
 - Network Streamer destination, packet rate/loss/order, and character ID
 - original `.mvn` checksum and exported 3DS Max BVH checksum
-- G1 retargeting configuration, offsets calibration revision, score report, and rendered review
+- robot and retargeting configuration, offsets calibration revision, score report, and rendered review
 
 The executable day-one checks are the Setup console's system check and 30-second stream check
 ([setup guide](engineer-setup-guide.md) steps 03 and 06).

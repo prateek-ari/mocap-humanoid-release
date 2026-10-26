@@ -208,7 +208,7 @@ docker run --rm xsens-ros2:jazzy bash -c 'cd /colcon_ws && colcon test --base-pa
 
 > SCREENSHOT: W01 · License Manager after activation. Show product and validity only; remove key, protection ID, email and customer details.
 
-See [the Windows runbook](windows-xsens-humanoid-setup.md). Manus fingers/props are a separate integration gate.
+See [the Windows runbook](windows-xsens-humanoid-setup.md). Manus gloves are not planned: the Booster K1 has no hands.
 
 ## Live route details
 
@@ -395,7 +395,7 @@ In every mode hardware authority stays locked; the console never connects to a r
 | Container `PermissionError` reading `/opt/mocap_humanoid/...` | Old image preserved owner-only source permissions | Rerun the live installer to rebuild. Do not run the viewer as root. |
 | Xauthority/socket missing; viewer will not open | Local X11 session, `DISPLAY`, `XAUTHORITY`, `/tmp/.X11-unix` | Use the real desktop session; no `xhost +`; SSH headless is not supported. |
 | Live startup times out | Receiver waiting but source not streaming required frames | Resume preview/playback and rerun after the port is free; do acceptance first. |
-| Hands pass through the hips (live) | Arm abduction set too low | Use the default `--arm-abduction` (G1 10, T1 22) or raise it a few degrees. |
+| Hands pass through the hips (live) | Arm abduction set too low | Use the default `--arm-abduction` (K1 22, G1 10, T1 22) or raise it a few degrees. |
 | Feet sink or float (live) | No neutral calibration yet | Press N with the performer standing still, or use `--calibrate-after`. |
 | Arms lag or cut through the body (live G1) | `--g1-hardware-envelope` is on | Leave it off in simulation; it previews real-robot speed limits. |
 | Huge dropped-frame count or wrong heading after Xsens restart | Sender reset its frame counter or recalibrated | Relaunch the live viewer, reconfirm source/calibration and rerun acceptance. R alone is not a heading reset. |

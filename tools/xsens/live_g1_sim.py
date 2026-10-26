@@ -191,7 +191,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "arm orientation until N is pressed in a neutral pose: the IK config's "
-            "offsets, or positions only (default: config for G1, position-only for T1)"
+            "offsets, or positions only (default: the robot's; position-only only for the 29-DOF T1)"
         ),
     )
     parser.add_argument("--human-height", type=float, default=None)
@@ -311,7 +311,7 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="DEGREES",
         help=(
             "rotate the arm targets outward about the shoulders so hanging arms clear "
-            "the hips (default: 10 for G1, 0 for T1)"
+            "the hips (default: the robot's; K1 22, G1 10, T1 22)"
         ),
     )
     parser.add_argument(
