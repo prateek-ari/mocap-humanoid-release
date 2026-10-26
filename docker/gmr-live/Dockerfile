@@ -58,7 +58,8 @@ RUN /opt/venv/bin/python -m pip install --no-cache-dir \
 WORKDIR /opt/mocap_humanoid
 COPY pyproject.toml ./
 COPY mocap_g1 ./mocap_g1
-# GMR ships no live MVN config for the Booster T1; the live tool installs this one.
+# GMR ships no live MVN configs for the Booster K1 and T1; the live tool installs them.
+COPY retarget_configs/xsens_mvn_to_booster_k1.json ./retarget_configs/xsens_mvn_to_booster_k1.json
 COPY retarget_configs/xsens_mvn_to_booster_t1_29dof.json ./retarget_configs/xsens_mvn_to_booster_t1_29dof.json
 COPY tools/xsens/live_g1_sim.py ./tools/xsens/live_g1_sim.py
 # run-offline.sh executes this script from the image (not a host bind mount), so

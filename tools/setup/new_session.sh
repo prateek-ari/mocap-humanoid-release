@@ -9,7 +9,7 @@ Usage: bash tools/setup/new_session.sh [options]
 
 Options:
   --route live|recorded   Workflow for this session (asked if omitted)
-  --robot ROBOT           unitree_g1 or booster_t1_29dof
+  --robot ROBOT           booster_k1 (default), unitree_g1 or booster_t1_29dof
   --workspace ABS_PATH    GMR runtime folder (default: ~/mocap-runtime)
   --defaults              Accept every default without asking
   -h, --help              Show this help
@@ -44,7 +44,7 @@ while (($#)); do
   esac
 done
 [[ -z $route || $route == recorded || $route == live ]] || die "--route must be recorded or live"
-[[ -z $robot || $robot == unitree_g1 || $robot == booster_t1_29dof ]] || die "unsupported robot: $robot"
+[[ -z $robot || $robot =~ ^(booster_k1|unitree_g1|booster_t1_29dof)$ ]] || die "unsupported robot: $robot"
 
 # Prefill from the previous session. The file is written by this script.
 if [[ -f $current_link ]]; then
@@ -107,19 +107,21 @@ tilde() { [[ $1 == "$HOME"/* ]] && printf '~/%s' "${1#"$HOME"/}" || printf '%s' 
 
 if [[ -z $route ]]; then
   step 'Which workflow is this session for?
-  1) Live Xsens suit -> G1 or Booster T1 simulation
-  2) Recorded BVH export -> G1 or Booster T1 simulation'
+  1) Live Xsens suit -> Booster K1, G1 or T1 simulation
+  2) Recorded BVH export -> Booster K1, G1 or T1 simulation'
   default=1
   [[ ${SESSION_ROUTE:-} != recorded ]] || default=2
   choose route "$default" live recorded
 fi
 if [[ -z $robot ]]; then
   step 'Which robot?
-  1) Unitree G1
-  2) Booster T1'
+  1) Booster K1
+  2) Unitree G1
+  3) Booster T1'
   default=1
-  [[ ${ROBOT:-} != booster_t1_29dof ]] || default=2
-  choose robot "$default" unitree_g1 booster_t1_29dof
+  [[ ${ROBOT:-} != unitree_g1 ]] || default=2
+  [[ ${ROBOT:-} != booster_t1_29dof ]] || default=3
+  choose robot "$default" booster_k1 unitree_g1 booster_t1_29dof
 fi
 
 step 'Session folder: a new folder for every take keeps results apart.'
@@ -217,8 +219,8 @@ else
   done
 fi
 
-if [[ $robot == booster_t1_29dof ]]; then
-  ik_config=$repo_root/retarget_configs/bvh_xsens_to_booster_t1_29dof.json
+if [[ $robot == booster_t1_29dof || $robot == booster_k1 ]]; then
+  ik_config=$repo_root/retarget_configs/bvh_xsens_to_$robot.json
 else
   ik_config=$mocap_ws/GMR/general_motion_retargeting/ik_configs/bvh_xsens_to_g1.json
 fi

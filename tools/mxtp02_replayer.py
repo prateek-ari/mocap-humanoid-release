@@ -106,6 +106,74 @@ XSENS_BVH_TO_SEGMENT = {
     "left_upper_leg": "LeftHip", "left_lower_leg": "LeftKnee",
     "left_foot": "LeftAnkle", "left_toe": "LeftToe",
 }
+#: BVH arm bones per side: collar -> upper arm, upper arm -> forearm, forearm -> hand.
+ARM_BONES = {
+    "left": ("LeftShoulder", "LeftElbow", "LeftWrist"),
+    "right": ("RightShoulder", "RightElbow", "RightWrist"),
+}
+#: How far an arm bind offset may lean from straight down or straight sideways.
+BIND_POSE_TOLERANCE_DEG = 10.0
+
+
+def bvh_joint_offsets(bvh_path):
+    """ROOT/JOINT name -> OFFSET (file axes, unscaled) from a BVH hierarchy."""
+    with Path(bvh_path).open("r", encoding="utf-8", errors="replace") as handle:
+        hierarchy = handle.read(2 * 1024 * 1024).split("MOTION", 1)[0]
+    offsets, joint = {}, None
+    for line in hierarchy.splitlines():
+        words = line.split()
+        if words[:1] in (["ROOT"], ["JOINT"]):
+            joint = words[1]
+        elif words[:2] == ["End", "Site"]:
+            joint = None
+        elif words[:1] == ["OFFSET"] and joint is not None and joint not in offsets:
+            offsets[joint] = np.array([float(word) for word in words[1:4]])
+    return offsets
+
+
+def _angle_deg(a, b):
+    cosine = float(a @ b) / (np.linalg.norm(a) * np.linalg.norm(b))
+    return math.degrees(math.acos(max(-1.0, min(1.0, cosine))))
+
+
+def arm_bind_corrections(bvh_path):
+    """BVH arm bone -> wxyz quaternion that moves its segment frame to the MVN T-pose.
+
+    Empty for a T-pose bind (a real MVN export). ``ValueError``
+    for an arm bind pose that is neither down nor sideways.
+    """
+    offsets = bvh_joint_offsets(bvh_path)
+    missing = [name for side in ARM_BONES.values() for name in ("Neck", *side) if name not in offsets]
+    if missing:
+        raise ValueError(f"{bvh_path}: BVH hierarchy lacks {', '.join(sorted(set(missing)))}")
+    down = -offsets["Neck"]
+    corrections = {}
+    for side, (shoulder, elbow, wrist) in ARM_BONES.items():
+        # The collar -> shoulder offset is where the T-pose arm points on this side.
+        angles = {
+            pose: [_angle_deg(offsets[bone], axis) for bone in (elbow, wrist)]
+            for pose, axis in (("down", down), ("sideways", offsets[shoulder]))
+        }
+        if max(angles["sideways"]) <= BIND_POSE_TOLERANCE_DEG:
+            continue
+        if max(angles["down"]) > BIND_POSE_TOLERANCE_DEG:
+            raise ValueError(
+                f"{bvh_path}: {side} arm bind pose is neither down nor sideways "
+                f"(upper arm {angles['down'][0]:.1f} deg from down, "
+                f"{angles['sideways'][0]:.1f} deg from sideways; forearm "
+                f"{angles['down'][1]:.1f} deg from down, {angles['sideways'][1]:.1f} deg "
+                "from sideways); only T-pose and arms-down binds are supported"
+            )
+        # q_mvn = q_bvh * R_x(-90 deg) left, R_x(+90 deg) right, in the loader's Z-up,
+        # X-forward frame: the T-pose arm axis (+/-y) then lands on the hanging arm
+        # (verified on the boxing clip: hand error 0.43 m -> 0.035 m).
+        half = math.radians(-45.0 if side == "left" else 45.0)
+        correction = np.array([math.cos(half), math.sin(half), 0.0, 0.0])
+        for bone in (shoulder, elbow, wrist):
+            corrections[bone] = correction
+    return corrections
+
+
 def xsens_bvh_segments(frame):
     """One GMR Xsens-loader frame -> (pos (23,3) metres, quat (23,4) wxyz) in MVN order."""
     pos = np.zeros((N_SEG, 3), dtype=np.float64)

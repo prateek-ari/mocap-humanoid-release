@@ -492,6 +492,10 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     if args.arm_mode == "calibrated" and (args.allow_zero_offsets or all_zero_offsets):
         raise RetargetError("--arm-mode calibrated is not allowed with zero/preview offsets")
     arm_mode = args.arm_mode or ("position-only" if args.allow_zero_offsets else "calibrated")
+    if not 0.0 <= args.arm_abduction <= 45.0:
+        raise RetargetError("--arm-abduction must be between 0 and 45 degrees")
+    if args.arm_abduction and arm_mode != "config":
+        raise RetargetError("--arm-abduction requires --arm-mode config")
     if args.calibration_output is not None and arm_mode != "npose":
         raise RetargetError("--calibration-output requires --arm-mode npose")
     if arm_mode == "npose":
@@ -535,6 +539,19 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     source_frame_count = len(frames)
     if not frames[:: args.frame_step]:
         raise RetargetError("--frame-step removed every frame")
+    if arm_mode == "config":
+        # The live stream's arm frames: what the IK config's arm offsets are reviewed against.
+        from mocap_g1.xsens_live import _quat_multiply_wxyz
+        from tools.mxtp02_replayer import arm_bind_corrections
+
+        try:
+            corrections = arm_bind_corrections(bvh_path)
+        except ValueError as exc:
+            raise RetargetError(str(exc)) from exc
+        for frame in frames:
+            for bone, correction in corrections.items():
+                position, orientation = frame[bone]
+                frame[bone] = (position, _quat_multiply_wxyz(np.asarray(orientation), correction))
 
     arm_calibration: dict[str, Any] | None = None
     if arm_mode == "npose":
@@ -607,6 +624,11 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         )
         if arm_mode == "position-only":
             _configure_position_only_arms(retargeter)
+        if args.arm_abduction:
+            from mocap_g1.live_arm_clearance import BVH_ARMS, ArmAbduction
+
+            ArmAbduction(retargeter, args.arm_abduction, chest="Chest4", root="Hips",
+                         arms=BVH_ARMS)
     # GMR is stateful: each pose seeds the next IK solve.  Retarget every
     # captured frame, then decimate the finished trajectory.  Decimating the
     # human frames first creates large solver jumps and can change IK branches.
@@ -670,6 +692,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "root_rot": "xyzw",
             "dof_joint_names": hinge_names,
             "arm_mode": arm_mode,
+            "arm_abduction_deg": float(args.arm_abduction),
         },
         "runtime": {
             "elapsed_s": elapsed,
@@ -736,8 +759,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--arm-mode",
-        choices=("position-only", "npose", "calibrated"),
-        help="Arm handling; npose derives robot-specific orientations from a reviewed neutral pose",
+        choices=("position-only", "npose", "calibrated", "config"),
+        help="Arm handling; npose derives robot-specific orientations from a reviewed neutral pose; "
+        "config keeps the IK config's arm orientations, as the live tool does (allowed for preview)",
+    )
+    parser.add_argument(
+        "--arm-abduction",
+        type=float,
+        default=0.0,
+        metavar="DEGREES",
+        help="with --arm-mode config: rotate arm targets outward about the shoulders, as the "
+        "live tool does (mocap_g1/live_arm_clearance.py)",
     )
     parser.add_argument("--calibration-bvh-file", type=Path)
     parser.add_argument("--calibration-start-seconds", type=float, default=0.0)

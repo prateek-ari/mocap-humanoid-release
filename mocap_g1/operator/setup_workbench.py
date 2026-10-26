@@ -41,6 +41,7 @@ import threading
 import time
 from typing import Any, Callable, Mapping
 
+from ..live_robots import LIVE_ROBOTS
 from ._version import service_version
 from .core import OperatorError
 from .stream_monitor import StreamMonitor, off_snapshot
@@ -89,7 +90,10 @@ _FIELD_KEYS = {
 _FLOAT_FIELDS = ("human_height_m", "bvh_scale", "npose_start_s", "npose_duration_s")
 _INT_FIELDS = ("start_frame", "end_frame", "frame_step")
 ROUTES = ("live", "recorded")
-ROBOTS = ("unitree_g1", "booster_t1_29dof")
+ROBOTS = ("booster_k1", "unitree_g1", "booster_t1_29dof")
+#: Robots whose recorded preview keeps the IK config's arm orientations and the live
+#: tool's arm abduction (no wrist, so no hand target to point the forearm).
+CONFIG_ARM_ROBOTS = ("booster_k1",)
 XSENS_UDP_PORT = "5555"
 JOB_KINDS = ("doctor", "acceptance", "live", "bvh_check", "retarget", "render", "save")
 JOB_STATES = ("running", "passed", "failed", "stopped")
@@ -693,10 +697,8 @@ class SetupWorkbench:
         return value
 
     def _ik_config(self, robot: str, mocap_ws: str) -> str:
-        if robot == "booster_t1_29dof":
-            return self._text(
-                self.repo_root / "retarget_configs" / "bvh_xsens_to_booster_t1_29dof.json"
-            )
+        if robot in ("booster_t1_29dof", "booster_k1"):
+            return self._text(self.repo_root / "retarget_configs" / f"bvh_xsens_to_{robot}.json")
         return f"{mocap_ws}/GMR/general_motion_retargeting/ik_configs/bvh_xsens_to_g1.json"
 
     def runtime_python(self, mocap_ws: str) -> str:
@@ -744,7 +746,7 @@ class SetupWorkbench:
         return {
             "route": "live",
             "session_dir": "",
-            "robot": "unitree_g1",
+            "robot": "booster_k1",
             "human_height_m": 1.75,
             "mocap_ws": self._default_runtime(),
             "motion_bvh": f"{home}/mocap-data/motion.bvh",
@@ -877,7 +879,7 @@ class SetupWorkbench:
             raise _invalid("Route must be live or recorded", "route")
         robot = text("robot", "Robot")
         if robot not in ROBOTS:
-            raise _invalid("Robot must be unitree_g1 or booster_t1_29dof", "robot")
+            raise _invalid("Robot must be booster_k1, unitree_g1 or booster_t1_29dof", "robot")
         session_dir = self._absolute(text("session_dir", "Session folder"), "session_dir", "Session folder")
         if not self._session_dir_allowed(session_dir):
             raise _invalid(SESSION_DIR_LOCATION_MESSAGE, "session_dir")
@@ -1384,6 +1386,13 @@ class SetupWorkbench:
                 + self._installer_hint(session["route"]),
                 code="recorded_runtime_missing",
             )
+        if (kind == "retarget" and options["mode"] == "npose"
+                and session["robot"] in CONFIG_ARM_ROBOTS):
+            raise SetupError(
+                "Booster K1 arms are aligned by its IK config in the preview motion; "
+                "an N-pose motion would leave its forearms free. Use Make preview motion.",
+                code="npose_not_supported",
+            )
         if kind in ("live", "render") and not self._display_available():
             raise SetupError(NO_DISPLAY_HINT, code="no_display")
         self._require_no_running_job()
@@ -1733,7 +1742,7 @@ class SetupWorkbench:
             )
         runtime_root = Path(env.get("GMR_LIVE_RUNTIME_ROOT")
                             or self.repo_root / "artifacts" / "xsens-live")
-        short = "t1" if session["robot"] == "booster_t1_29dof" else "g1"
+        short = LIVE_ROBOTS[session["robot"]].label.lower()
         return runtime_root / f"{short}-live.mp4"
 
     def acceptance_argv(self, session: Mapping[str, Any], env: Mapping[str, str],
@@ -1874,6 +1883,9 @@ class SetupWorkbench:
                     "--calibration-output", f"{folder}/{robot}-arm-calibration.json",
                     "--accept-reviewed-calibration-window",
                 ]
+            elif robot in CONFIG_ARM_ROBOTS:
+                argv += ["--arm-mode", "config", "--arm-abduction",
+                         _format_number(LIVE_ROBOTS[robot].arm_abduction_deg)]
             else:
                 argv += ["--arm-mode", "position-only"]
             argv.append("--overwrite")

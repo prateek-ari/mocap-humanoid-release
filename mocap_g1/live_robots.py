@@ -54,6 +54,39 @@ T1_UPPER_BODY_JOINTS = tuple(
     and "Ankle" not in name
 )
 
+#: Hinge joints of GMR's ``assets/booster_k1/K1_serial.xml`` (the 22-DOF Booster
+#: K1) in qpos order, which is also the Booster SDK's ``JointIndexK1`` motor order,
+#: with their position ranges (rad): the intersection of Booster's official ranges
+#: (booster_assets ``robots/K1/K1_22dof.urdf`` @12a9751, BSD-3-Clause) and GMR's
+#: model, so the simulator stays inside both.
+K1_JOINT_RANGES: tuple[tuple[str, float, float], ...] = (
+    ("AAHead_yaw", -1.0, 1.0),
+    ("Head_pitch", -0.314, 0.794),
+    ("ALeft_Shoulder_Pitch", -2.932, 1.196),
+    ("Left_Shoulder_Roll", -1.642, 1.57),
+    ("Left_Elbow_Pitch", -1.885, 1.885),
+    ("Left_Elbow_Yaw", -2.242, 0.0),
+    ("ARight_Shoulder_Pitch", -2.932, 1.196),
+    ("Right_Shoulder_Roll", -1.57, 1.629),
+    ("Right_Elbow_Pitch", -1.885, 1.885),
+    ("Right_Elbow_Yaw", 0.0, 2.242),
+    ("Left_Hip_Pitch", -2.958, 2.21),
+    ("Left_Hip_Roll", -0.375, 1.536),
+    ("Left_Hip_Yaw", -1.0, 1.0),
+    ("Left_Knee_Pitch", 0.0, 2.23),
+    ("Left_Ankle_Pitch", -0.87, 0.345),
+    ("Left_Ankle_Roll", -0.345, 0.345),
+    ("Right_Hip_Pitch", -2.958, 2.21),
+    ("Right_Hip_Roll", -1.536, 0.375),
+    ("Right_Hip_Yaw", -1.0, 1.0),
+    ("Right_Knee_Pitch", 0.0, 2.23),
+    ("Right_Ankle_Pitch", -0.87, 0.345),
+    ("Right_Ankle_Roll", -0.345, 0.345),
+)
+K1_JOINTS = tuple(name for name, _lower, _upper in K1_JOINT_RANGES)
+#: The arms; the K1 has no waist, and its head is not driven by the live IK.
+K1_UPPER_BODY_JOINTS = K1_JOINTS[2:10]
+
 #: Arm segments of the GMR ``xsens_mvn`` source (MXTP02 converted names).
 MVN_ARM_BODIES = (
     "Left_UpperArm",
@@ -86,9 +119,27 @@ class LiveRobot:
     #: Outward arm rotation about the shoulder so hanging arms clear the hips
     #: (see mocap_g1/live_arm_clearance.py).
     arm_abduction_deg: float
+    #: Position ranges of ``dof_joints`` for the simulation bounds; ``None`` (the G1)
+    #: reads them from the official URDF.
+    joint_ranges: tuple[tuple[str, float, float], ...] | None = None
 
 
 LIVE_ROBOTS: dict[str, LiveRobot] = {
+    "booster_k1": LiveRobot(
+        key="booster_k1",
+        label="K1",
+        nq=7 + len(K1_JOINTS),
+        dof_joints=K1_JOINTS,
+        upper_body_joints=K1_UPPER_BODY_JOINTS,
+        ik_config=REPO_ROOT / "retarget_configs/xsens_mvn_to_booster_k1.json",
+        # No wrist, so no hand target: with position-only arms nothing points the
+        # forearm. The world-aligned zero-pose frames take the T1 config's offsets.
+        default_arm_alignment="config",
+        # Collision box bottom 0.024 m below the foot body origin at the zero pose.
+        feet=(("left_foot_link", 0.024), ("right_foot_link", 0.024)),
+        arm_abduction_deg=22.0,
+        joint_ranges=K1_JOINT_RANGES,
+    ),
     "unitree_g1": LiveRobot(
         key="unitree_g1",
         label="G1",
@@ -119,5 +170,6 @@ LIVE_ROBOTS: dict[str, LiveRobot] = {
         # Standing hands sat 7.6 cm inside T1's hips; 22 deg leaves 2.2 cm and
         # no contact on the measured take (18 deg: 0.5 cm).
         arm_abduction_deg=22.0,
+        joint_ranges=T1_MOCAP_JOINT_RANGES,
     ),
 }

@@ -6,14 +6,14 @@ Open [the interactive version](engineer-setup.html) to follow one step at a time
 
 ## 01 · Before you start
 
-**Goal:** your live Xsens suit movement drives a simulated Unitree G1 or Booster T1 in MuJoCo. A physical robot is optional and comes later; this guide does not use one.
+**Goal:** your live Xsens suit movement drives a simulated Booster K1 (the default robot), Unitree G1 or Booster T1 in MuJoCo. A physical robot is optional and comes later; this guide does not use one.
 
 Pick a route:
 
 | Route | Robots | Use it when |
 | --- | --- | --- |
-| **Live** · Xsens suit → UDP stream → Linux → MuJoCo | Unitree G1 or Booster T1 | Normal use: the robot follows the performer in real time |
-| **Recorded** · Windows BVH export → Linux retarget → MuJoCo | Unitree G1 or Booster T1 | Repeatable reviews, comparisons and saved videos |
+| **Live** · Xsens suit → UDP stream → Linux → MuJoCo | Booster K1 (default), Unitree G1 or Booster T1 | Normal use: the robot follows the performer in real time |
+| **Recorded** · Windows BVH export → Linux retarget → MuJoCo | Booster K1 (default), Unitree G1 or Booster T1 | Repeatable reviews, comparisons and saved videos |
 
 You need:
 
@@ -47,9 +47,9 @@ The installer asks short questions. Press **Enter** to accept each default:
 
 | Question | Default | Notes |
 | --- | --- | --- |
-| What to set up | 1 · Live | Builds the live image for both robots. Choose 2 for recorded |
+| What to set up | 1 · Live | Builds the live image for every robot. Choose 2 for recorded |
 | Also build ROS 2 | No | Live only, optional |
-| Which robot / GMR runtime folder | Unitree G1, `~/mocap-runtime` | Recorded only. Large download, kept outside the project folder |
+| Which robot / GMR runtime folder | Booster K1, `~/mocap-runtime` | Recorded only. Large download, kept outside the project folder |
 | Install missing Ubuntu packages | Yes | May ask for your password once |
 | Open the Setup console now | Yes | Opens it in your browser |
 
@@ -79,7 +79,7 @@ Check that `docker info` lists the `nvidia` runtime, then run the installer and 
 
 Each take or test gets its own session folder. In the Setup console, pick **Live** or **Recorded** at the top left, then open **03 Session**:
 
-1. Choose the robot: **Unitree G1** or **Booster T1**.
+1. Choose the robot: **Booster K1** (the default), **Unitree G1** or **Booster T1**.
 2. Enter the **measured** performer height in metres.
 3. Keep the suggested session folder (a new dated folder under `~/mocap-sessions`), or type another one inside your home folder.
 4. **Live:** type the **Windows Xsens IP** (run `ipconfig` on Windows and read the Xsens Ethernet adapter), then choose the **Linux Xsens IP**: the address marked *(detected)* is the adapter on the Xsens router. Both can stay empty until you know them.
@@ -186,7 +186,7 @@ Keys in the MuJoCo window (click it first):
 - **R** resets from the current pose after a stream drop.
 - **N** recalibrates; stand still in the neutral pose first.
 
-Check neutral stance, both arms, knee bends, steps and turns against the performer. The arms are deliberately held a few degrees away from the body (10° on the G1, 22° on the T1) so hanging hands clear the robot's wider hips.
+Check neutral stance, both arms, knee bends, steps and turns against the performer. The arms are deliberately held a few degrees away from the body (22° on the K1 and T1, 10° on the G1) so hanging hands clear the robot's wider hips.
 
 No suit yet? Replay a real recording into the same viewer: see [Testing without an Xsens suit](testing-without-suit.md#replay-a-real-recording).
 
@@ -215,9 +215,9 @@ The check reads each file's frame count and frame time (`0.0166667` means 60 Hz)
 
 Open **09 Retarget** and click **Make preview**. This retargets the human motion onto your selected robot and saves `<robot>-preview.pkl` in the session folder. Running it again replaces the earlier file.
 
-![Step 09: preview motion made for the Unitree G1](engineer-guide-assets/setup-09-retarget.png)
+![Step 09: preview motion made for the Booster K1](engineer-guide-assets/setup-09-retarget.png)
 
-**Optional: better arm alignment.** In Xsens playback, find a moment where the performer stands still with arms down. If it is not at 2.0 s for 1.0 s, change **Neutral start** and **Neutral length** in step 03 and save. Then click **Make arm-aligned (N-pose)**; it saves `<robot>-npose.pkl` and an arm calibration file.
+**Optional: better arm alignment.** In Xsens playback, find a moment where the performer stands still with arms down. If it is not at 2.0 s for 1.0 s, change **Neutral start** and **Neutral length** in step 03 and save. Then click **Make arm-aligned (N-pose)**; it saves `<robot>-npose.pkl` and an arm calibration file. The Booster K1 does not need it and refuses it: its preview motion already aligns the arms as the live view does.
 
 Both outputs are **preview quality**. Full calibrated offsets, arm/body clearance correction and G1/T1 comparisons are in [the reference](engineer-reference.md#recorded-route-advanced).
 
@@ -230,7 +230,7 @@ Open **10 Watch and record** and choose **Preview** or **Arm-aligned**.
 - **Open viewer** plays the motion once in a MuJoCo window on this PC.
 - **Record MP4** renders it to `<robot>-preview.mp4` (or `-npose.mp4`) in the session folder. Let it finish; do not close the window early. The video then plays right in the console.
 
-![Step 10: MP4 recorded and playing in the console](engineer-guide-assets/setup-10-render.png)
+![Step 10: K1 MP4 recorded and playing in the console](engineer-guide-assets/setup-10-render.png)
 
 ![Historical G1 and Booster T1 simulation comparison; same Xsens recording, preview calibration](engineer-guide-assets/g1-t1-preview.jpg)
 
@@ -248,7 +248,7 @@ Open **10 Watch and record** and choose **Preview** or **Arm-aligned**.
 
 For the next take, go back to step 03 and click **New session**. Closing the browser tab leaves the console running in the background, ready for the menu entry; to stop it, run `bash tools/setup/open_console.sh --stop` in the project folder.
 
-Nothing here approves physical robot use. Connecting a real robot is optional, later, and not covered by this guide; the live viewer's `--g1-hardware-envelope` previews the speed-limited commands a real G1 would receive. Booster hardware is not supported by this project.
+Nothing here approves physical robot use. Connecting a real robot is optional, later, and not covered by this guide; the live viewer's `--g1-hardware-envelope` previews the speed-limited commands a real G1 would receive. This release does not control a physical Booster K1.
 
 ## 12 · Fix common problems
 

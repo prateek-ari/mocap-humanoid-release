@@ -11,7 +11,7 @@ Usage: bash tools/setup/install.sh                      (step-by-step questions)
 
 Options:
   --workspace ABS_PATH  External GMR runtime workspace (recorded; default: ~/mocap-runtime)
-  --robot ROBOT         unitree_g1 (default) or booster_t1_29dof (recorded only)
+  --robot ROBOT         booster_k1 (default), unitree_g1 or booster_t1_29dof (recorded only)
   --python COMMAND      Python >=3.10 to create the project venv (default: python3)
   --with-ros2           Build xsens-ros2:jazzy too (live only)
   --system-packages     Install missing Ubuntu 22.04/24.04 apt prerequisites (uses sudo)
@@ -69,7 +69,7 @@ else
 fi
 
 workspace=''
-robot=unitree_g1
+robot=booster_k1
 python=python3
 with_ros2=0
 system_packages=0
@@ -127,8 +127,8 @@ ubuntu_supported() {
 if (( wizard )); then
   printf '\nMocap humanoid setup. Press Enter to accept the [default] answer.\n\n'
   printf 'Step 1 · What do you want to set up?\n'
-  printf '  1) Live Xsens suit -> G1 or Booster T1 simulation (needs Docker + NVIDIA)\n'
-  printf '  2) Recorded BVH export -> G1 or Booster T1 simulation\n'
+  printf '  1) Live Xsens suit -> Booster K1, G1 or T1 simulation (needs Docker + NVIDIA)\n'
+  printf '  2) Recorded BVH export -> Booster K1, G1 or T1 simulation\n'
   printf '  3) Project tools only (console and checks)\n'
   while true; do
     ask 'Choice' 1
@@ -139,12 +139,13 @@ if (( wizard )); then
     esac
   done
   if [[ $profile == recorded ]]; then
-    printf '\nStep 2 · Which robot?\n  1) Unitree G1\n  2) Booster T1\n'
+    printf '\nStep 2 · Which robot?\n  1) Booster K1\n  2) Unitree G1\n  3) Booster T1\n'
     while true; do
       ask 'Choice' 1
       case $REPLY in
-        1) robot=unitree_g1; break ;;
-        2) robot=booster_t1_29dof; robot_given=1; break ;;
+        1) robot=booster_k1; break ;;
+        2) robot=unitree_g1; robot_given=1; break ;;
+        3) robot=booster_t1_29dof; robot_given=1; break ;;
       esac
     done
     printf '\nStep 3 · GMR runtime folder (large download, kept outside this checkout)\n'
@@ -156,7 +157,7 @@ if (( wizard )); then
       printf 'then rerun this setup.\n'
       ask_yes 'Continue anyway?' n || exit 0
     fi
-    printf '\nStep 2 · The live image runs both robots. ROS 2 topics are optional.\n'
+    printf '\nStep 2 · The live image runs every robot. ROS 2 topics are optional.\n'
     if ask_yes 'Also build the ROS 2 image?' n; then with_ros2=1; fi
   fi
   printf '\nLast step · '
@@ -174,7 +175,7 @@ if (( wizard )); then
   ask_yes 'Start?' y || exit 0
 fi
 
-[[ $robot == unitree_g1 || $robot == booster_t1_29dof ]] || die "unsupported robot: $robot"
+[[ $robot =~ ^(booster_k1|unitree_g1|booster_t1_29dof)$ ]] || die "unsupported robot: $robot"
 if [[ $profile == recorded ]]; then
   if [[ -z $workspace ]]; then
     [[ -n ${HOME:-} ]] || die "recorded needs --workspace /absolute/external/path"

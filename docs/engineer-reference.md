@@ -4,16 +4,16 @@ Details behind the [step-by-step setup guide](engineer-setup-guide.md). Use the 
 
 ## Capability boundary
 
-| Workflow | Unitree G1 | Booster T1 |
-| --- | --- | --- |
-| Real suit → live UDP → MuJoCo | Implemented; commission with real-stream acceptance | Implemented (simulation only); commission with real-stream acceptance |
-| Real recording → 3DS Max BVH → MuJoCo | Implemented | Implemented with project T1 mapping |
-| Browser operator console | Passive MP4 review or virtual G1 NPZ simulation | Passive MP4 review; no T1 virtual simulator |
-| Physical robot control | Outside this guide; whole-body authority remains locked | Simulation comparator only |
+| Workflow | Booster K1 (default) | Unitree G1 | Booster T1 |
+| --- | --- | --- | --- |
+| Real suit → live UDP → MuJoCo | Implemented; commission with real-stream acceptance | Implemented; commission with real-stream acceptance | Implemented (simulation only); commission with real-stream acceptance |
+| Real recording → 3DS Max BVH → MuJoCo | Implemented with project K1 mapping (config arms) | Implemented | Implemented with project T1 mapping |
+| Browser operator console | Setup console and passive MP4 review; no K1 virtual simulator | Passive MP4 review or virtual G1 NPZ simulation | Passive MP4 review; no T1 virtual simulator |
+| Physical robot control | Not part of this release | Outside this guide; whole-body authority remains locked | Simulation comparator only |
 
 **What is proven:** recorded G1/T1 previews, synthetic live/ROS ingest, and live G1/T1 retargeting of a real recorded take replayed as MXTP02 (no hand/arm overlap with the hips on either robot, about 59 FPS). **What is outstanding:** real MXTP02/MXTP20 stream acceptance and full reviewed Xsens offsets. Existing demonstration takes remain preview-grade. MuJoCo here shows kinematic motion; it does not prove standing balance or a tracking controller. A physical robot is optional and later.
 
-The data flow is Windows Xsens capture → Linux acceptance → G1 or T1 live MuJoCo, or Windows BVH export → Linux GMR retargeter → G1/T1 MuJoCo. ROS 2 is an optional separate consumer. The browser console is a separate review tool. See the [project README](../README.md) for the overview.
+The data flow is Windows Xsens capture → Linux acceptance → K1, G1 or T1 live MuJoCo, or Windows BVH export → Linux GMR retargeter → K1, G1 or T1 MuJoCo. ROS 2 is an optional separate consumer. The browser console is a separate review tool. See the [project README](../README.md) for the overview.
 
 ## Workstation requirements
 
@@ -30,8 +30,8 @@ Keep Internet on Wi-Fi and connect both PCs' Ethernet to the Xsens router. Do no
 | Command | Installs |
 | --- | --- |
 | `bash tools/setup/install.sh core` | Project `.venv`, runtime/operator dependencies, doctor and decoder self-test |
-| `bash tools/setup/install.sh live` | Core plus the live image (G1 and T1), after Docker/NVIDIA/X11 preflight |
-| `bash tools/setup/install.sh recorded --workspace "$HOME/mocap-runtime" --robot unitree_g1` | Core plus the pinned GMR runtime (`--robot booster_t1_29dof` for T1); also needed to replay recordings into the live viewer |
+| `bash tools/setup/install.sh live` | Core plus the live image (every robot), after Docker/NVIDIA/X11 preflight |
+| `bash tools/setup/install.sh recorded --workspace "$HOME/mocap-runtime" --robot booster_k1` | Core plus the pinned GMR runtime (`--robot unitree_g1` or `booster_t1_29dof` for the others); also needed to replay recordings into the live viewer |
 | `bash tools/setup/install.sh live --with-ros2` | Live plus the optional ROS 2 image |
 
 Options: `--system-packages` installs any missing Ubuntu packages with sudo (skipped when all are present); `--dry-run` prints the commands without running anything; `--python python3.12` picks the interpreter for a new `.venv`. `--workspace` defaults to `~/mocap-runtime` and must be outside the checkout. The installer stops at the first failure and is safe to rerun. It never runs pip as root and never deletes an existing environment.
@@ -78,12 +78,12 @@ export WINDOWS_XSENS_IP='<Windows ipconfig address>'
 export LINUX_XSENS_IP='<Linux ip -br -4 address>'
 export XSENS_SOURCE_IP="$WINDOWS_XSENS_IP"
 export XSENS_UDP_PORT=5555
-export ROBOT='unitree_g1'
-export IK_CONFIG="$MOCAP_WS/GMR/general_motion_retargeting/ik_configs/bvh_xsens_to_g1.json"
+export ROBOT='booster_k1'
+export IK_CONFIG="$PWD/retarget_configs/bvh_xsens_to_booster_k1.json"
 mkdir -p "$SESSION_DIR"
 ```
 
-For Booster T1, set `ROBOT=booster_t1_29dof` and `IK_CONFIG="$PWD/retarget_configs/bvh_xsens_to_booster_t1_29dof.json"`. The **Linux IP is the destination entered in Xsens**; the **Windows IP is the source filter used on Linux**. IP addresses come from DHCP; confirm them every session. Do not enter license keys or activation data.
+For the Unitree G1, set `ROBOT=unitree_g1` and `IK_CONFIG="$MOCAP_WS/GMR/general_motion_retargeting/ik_configs/bvh_xsens_to_g1.json"`; for Booster T1, `ROBOT=booster_t1_29dof` and `IK_CONFIG="$PWD/retarget_configs/bvh_xsens_to_booster_t1_29dof.json"`. The **Linux IP is the destination entered in Xsens**; the **Windows IP is the source filter used on Linux**. IP addresses come from DHCP; confirm them every session. Do not enter license keys or activation data.
 
 ## Terminal equivalents of the Setup console
 
@@ -262,12 +262,12 @@ Expect `/link_states`, `/joint_states`, `/tf`, `/com` and `/diagnostics` while X
 
 ### Live viewer behaviour
 
-`tools/xsens/live_operator.sh gmr --robot unitree_g1|booster_t1_29dof` loads the robot (29-joint G1 or 27-hinge T1), retargets the newest MXTP02 frame and ignores MXTP20. Space enables waist/arm tracking; R resets/rearms from the current pose; N (or `--calibrate-after SECONDS`) runs the neutral-pose calibration. On a stale/hard-timeout latch, restore the source and inspect the cause before pressing R. Legs and the free base are kinematic preview. Reported FPS and latency do not measure full suit-to-display latency. See [the live implementation](../tools/xsens/live_g1_sim.py).
+`tools/xsens/live_operator.sh gmr --robot booster_k1|unitree_g1|booster_t1_29dof` loads the robot (22-joint K1, the default; 29-joint G1 or 27-hinge T1), retargets the newest MXTP02 frame and ignores MXTP20. Space enables waist/arm tracking; R resets/rearms from the current pose; N (or `--calibrate-after SECONDS`) runs the neutral-pose calibration. On a stale/hard-timeout latch, restore the source and inspect the cause before pressing R. Legs and the free base are kinematic preview. Reported FPS and latency do not measure full suit-to-display latency. See [the live implementation](../tools/xsens/live_g1_sim.py).
 
 What the live viewer does, and why (measured on a recorded MVN take replayed as MXTP02):
 
-- **IK configs.** G1 uses GMR's upstream `xsens_mvn_to_g1.json`; its arm offsets were tuned by the Xsens author on a live MVN stream and keep every elbow bending the performer's way. T1 uses the project's [`xsens_mvn_to_booster_t1_29dof.json`](../retarget_configs/xsens_mvn_to_booster_t1_29dof.md); GMR ships none.
-- **Arm abduction.** Every arm target is rotated outward about the shoulder, 10° on the G1 and 22° on the T1 (`--arm-abduction` overrides), because both robots' hip housings stand out further than their shoulders: hanging arms otherwise pass through the hips (G1 429 → 0, T1 561 → 0 of 840 frames).
+- **IK configs.** G1 uses GMR's upstream `xsens_mvn_to_g1.json`; its arm offsets were tuned by the Xsens author on a live MVN stream and keep every elbow bending the performer's way. T1 uses the project's [`xsens_mvn_to_booster_t1_29dof.json`](../retarget_configs/xsens_mvn_to_booster_t1_29dof.md) and K1 the project's [`xsens_mvn_to_booster_k1.json`](../retarget_configs/xsens_mvn_to_booster_k1.json), which takes the T1 arm offsets; GMR ships none.
+- **Arm abduction.** Every arm target is rotated outward about the shoulder, 10° on the G1 and 22° on the T1 and K1 (`--arm-abduction` overrides), because both robots' hip housings stand out further than their shoulders: hanging arms otherwise pass through the hips (G1 429 → 0, T1 561 → 0 of 840 frames).
 - **Neutral calibration (N).** Puts the feet on the floor (the live stream is not grounded; the G1 otherwise sits about 8 cm low). For the T1, whose arms start position-only, it also derives arm orientation offsets from the neutral pose.
 - **Command screening.** Simulation screens commands by joint ranges with stale hold and hard-timeout latch. `--g1-hardware-envelope` instead applies the G1 hardware safety envelope (speed/acceleration limited); in simulation it lags fast arm motion (up to 182°) and cuts through the body, so it is for real-robot readiness checks only.
 - **GMR limits.** The pinned GMR passes its limits to mink in the `safety_break` slot, so they never reach the solver; the live process corrects this ([`mocap_g1/live_ik.py`](../mocap_g1/live_ik.py)) and uses joint-range limits only. mink 1.2.0's `CollisionAvoidanceLimit` was tried and rejected: it made the robot vibrate while standing.
@@ -284,7 +284,7 @@ Retarget outputs embed metadata (robot, source/config hashes, quaternion order).
 
 ### N-pose arm alignment
 
-The N-pose offsets are derived per robot arm chain. Do not copy G1 arm quaternions to T1 or reuse LAFAN offsets. `--allow-zero-offsets` keeps the result preview-grade (`preview_calibration: true`, `quality_approved: false`). A checked N-pose is not complete segment/axial-twist calibration. Pass `--accept-reviewed-calibration-window` only after reviewing the window in Xsens.
+The N-pose offsets are derived per robot arm chain. The Booster K1 does not use them: its forearm has no hand target, so the N-pose reference solve leaves it free to twist. Its preview motion uses `--arm-mode config --arm-abduction 22` instead, which matches the live K1 arms within 1.6° RMS. Do not copy G1 arm quaternions to T1 or reuse LAFAN offsets. `--allow-zero-offsets` keeps the result preview-grade (`preview_calibration: true`, `quality_approved: false`). A checked N-pose is not complete segment/axial-twist calibration. Pass `--accept-reviewed-calibration-window` only after reviewing the window in Xsens.
 
 ### Complete offsets
 

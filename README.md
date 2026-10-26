@@ -1,6 +1,6 @@
 # Mocap Humanoid
 
-Move in an Xsens motion-capture suit and watch a simulated humanoid robot (Unitree G1 or Booster T1) copy your movements on screen.
+Move in an Xsens motion-capture suit and watch a simulated humanoid robot copy your movements on screen: the Booster K1 by default, or the Unitree G1 or Booster T1.
 
 You can use it in two ways:
 
@@ -35,6 +35,8 @@ Everything the app needs is installed into `C:\Program Files\Mocap Humanoid`, wi
 2. Open **Mocap Humanoid** from the desktop. When its Xsens lamp turns green, choose the robot and the performer's height and press **Start**. The robot follows the performer in a separate window.
 3. With the performer standing still, arms relaxed, click **Calibrate**. **Stop** ends the run; tick **Record video** before Start to save an MP4.
 
+The Windows app 0.1.0.5 offers the Unitree G1 and Booster T1. The Booster K1 runs on Ubuntu and in the [Windows one-PC setup](docs/windows-setup.md); the next app build adds it.
+
 Details and troubleshooting: [Windows app guide](docs/windows-app.md). The app is new: it passed automated tests on a clean Windows machine but has not yet been used with a real suit.
 
 **Recorded takes on Windows:** the app covers the live route. To turn saved Xsens takes into robot videos on Windows, use the [Windows one-PC setup](docs/windows-setup.md) (download the project and double-click `Install-Windows.cmd`).
@@ -57,7 +59,7 @@ On the Ubuntu PC, open a terminal and paste this line:
 sudo apt-get update && sudo apt-get install -y git && git clone https://github.com/prateek-ari/mocap-humanoid-release.git && cd mocap-humanoid-release && bash install-ubuntu.sh
 ```
 
-Already downloaded the project? Run `bash install-ubuntu.sh` from its folder.
+Already downloaded the project? Run `bash install-ubuntu.sh` from its folder. To update an earlier install (for example, to get the Booster K1), run `git pull` in the project folder and then `bash install-ubuntu.sh` again: it rebuilds the live simulation.
 
 The script checks the PC and installs only what is missing: the NVIDIA driver, Docker, the NVIDIA Container Toolkit and the project itself. If it installs the NVIDIA driver, it asks you to restart: run the same command again after the restart. Run it from a terminal on the PC's desktop, not over SSH. `bash install-ubuntu.sh --check` only reports what is missing.
 

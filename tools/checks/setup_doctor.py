@@ -20,6 +20,13 @@ import sys
 ROOT = Path(__file__).resolve().parents[2]
 IMAGE = "gmr-live:bb1bbe4"
 PINNED_GMR = "bb1bbe40774794fceb2a7c579a3464a28e68c844"
+#: Robots of the recorded route: key, check name, model under GMR's assets/.
+#: Listed here, not read from mocap_g1, because the doctor runs before the venv exists.
+RECORDED_MODELS = (
+    ("booster_k1", "k1_model", "booster_k1/K1_serial.xml"),
+    ("unitree_g1", "g1_model", "unitree_g1/g1_mocap_29dof.xml"),
+    ("booster_t1_29dof", "booster_model", "booster_t1_29dof/t1_mocap.xml"),
+)
 WINDOWS_MIN_PYTHON = (3, 13)
 WINDOWS_PYTHON_REASON = "Windows time.monotonic is 15.6 ms-granular before Python 3.13"
 WINDOWS_INSTALL = "Run Install-Windows.cmd (it installs Python 3.13 and rebuilds the runtime)."
@@ -267,10 +274,10 @@ def _workspace_checks(workspace: Path | None, robot: str, *, windows: bool = Fal
                              f"NumPy {versions['numpy']}, SciPy {versions['scipy']}, "
                              f"MuJoCo {versions['mujoco']}, and GMR import" if valid else
                              failed_detail, bootstrap))
-    for model_name, relative in (("g1_model", "unitree_g1/g1_mocap_29dof.xml"),
-                            ("booster_model", "booster_t1_29dof/t1_mocap.xml")):
+    # Only the selected robot's model blocks; the others are optional.
+    for robot_key, model_name, relative in RECORDED_MODELS:
         path = gmr / "assets" / relative
-        missing_status = "block" if model_name == "g1_model" or selected_robot == "booster_t1_29dof" else "warn"
+        missing_status = "block" if robot_key == selected_robot else "warn"
         checks.append(_check(model_name, "pass" if path.is_file() else missing_status, str(path), verify))
     return checks
 
@@ -490,7 +497,7 @@ def _default_workspace(env: dict[str, str]) -> Path:
 
 
 def diagnose(profile: str, *, workspace: Path | None = None,
-             robot: str = "unitree_g1", with_operator: bool = False,
+             robot: str = "booster_k1", with_operator: bool = False,
              env: dict[str, str] | None = None,
              platform: str | None = None) -> dict[str, object]:
     if profile not in ("core", "recorded", "live"):
@@ -523,15 +530,15 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("profile", choices=("core", "recorded", "live"))
     parser.add_argument("--workspace", type=Path, help="external GMR workspace (recorded profile; live on Windows)")
-    parser.add_argument("--robot", choices=("unitree_g1", "booster_t1_29dof"),
-                        default="unitree_g1", help="required recorded model (default: %(default)s)")
+    parser.add_argument("--robot", choices=tuple(key for key, _name, _model in RECORDED_MODELS),
+                        default="booster_k1",
+                        help="required recorded model (default: %(default)s); the live profile "
+                        "drives every robot in mocap_g1/live_robots.py")
     parser.add_argument("--with-operator", action="store_true", help="also test FastAPI and Uvicorn")
     parser.add_argument("--json", action="store_true", help="print machine-readable report")
     args = parser.parse_args(argv)
     if args.workspace and args.profile != "recorded" and not (args.profile == "live" and _is_windows()):
         parser.error("--workspace is only used by the recorded profile")
-    if args.profile == "live" and args.robot != "unitree_g1":
-        parser.error("live streaming supports unitree_g1 only; use recorded for Booster T1")
     report = diagnose(args.profile, workspace=args.workspace, robot=args.robot,
                       with_operator=args.with_operator)
     if args.json:

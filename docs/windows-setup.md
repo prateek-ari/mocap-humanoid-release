@@ -4,7 +4,7 @@
 > app](windows-app.md) installs everything offline and runs the live G1/T1 simulation from one
 > window. This ZIP route stays for the recorded BVH route and for development.
 
-Install and run the live suit → MuJoCo G1/T1 simulation (and the recorded BVH route) natively on
+Install and run the live suit → MuJoCo K1, G1 or T1 simulation (and the recorded BVH route) natively on
 the **same Windows PC that runs Xsens Humanoid**. No Linux PC, Docker or WSL. After a one-click
 install, everything is done in the **Setup console** in your browser.
 
@@ -32,7 +32,7 @@ Windows PC
 
 | Works on Windows | Not on Windows |
 | --- | --- |
-| Live suit → MuJoCo, Unitree G1 and Booster T1 | ROS 2 stage (`live_operator.sh ros2`) |
+| Live suit → MuJoCo, Booster K1, Unitree G1 and Booster T1 | ROS 2 stage (`live_operator.sh ros2`) |
 | Stream check, neutral calibration (N), MP4 recording | Physical robot control |
 | Recorded route: BVH check, retarget, watch/record MP4 | `make` targets and the bash tools |
 | Session values, report saving, system check | Docker images |
@@ -115,7 +115,7 @@ Open **Mocap Setup** from the Start menu or the desktop. It starts the console i
 
 **Live route**
 
-1. **Session.** Route **Live**, the robot (Unitree G1 or Booster T1), the performer's measured
+1. **Session.** Route **Live**, the robot (Booster K1, the default; Unitree G1 or Booster T1), the performer's measured
    height, and **Xsens Humanoid runs on: This PC**. Click **Run system check**: it checks Python,
    the runtime, an OpenGL test render and that UDP 5555 is free. Then **Save session**.
 2. **Xsens: suit and streaming.** Calibrate the suit in Xsens Humanoid as usual and set up the

@@ -305,6 +305,11 @@ def check(workspace: Path, *, require_runtime: bool = True) -> dict:
         str(gmr / "assets/unitree_g1/g1_mocap_29dof.xml"),
     )
     record(
+        "k1_mjcf",
+        (gmr / "assets/booster_k1/K1_serial.xml").is_file(),
+        str(gmr / "assets/booster_k1/K1_serial.xml"),
+    )
+    record(
         "xsens_smoke_bvh",
         (gmr / "assets/xsens_bvh_test/251021_04_boxing_120Hz_cm_3DsMax.bvh").is_file(),
         "pinned upstream sample",
@@ -331,7 +336,7 @@ def check(workspace: Path, *, require_runtime: bool = True) -> dict:
 
     preparation_checks = (
         "workspace", "gmr_checkout", "gmr_commit", "grounding_patch", "optional_torch_patch",
-        "g1_config", "g1_mjcf", "xsens_smoke_bvh",
+        "g1_config", "g1_mjcf", "k1_mjcf", "xsens_smoke_bvh",
     )
     runtime_checks = ("venv_python", "runtime_imports", "runtime_lock")
     prepared_ok = all(bool(checks[name]["ok"]) for name in preparation_checks)

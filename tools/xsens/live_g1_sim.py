@@ -50,7 +50,6 @@ from mocap_g1.live_robots import (
     ARM_ALIGNMENTS,
     LIVE_ROBOTS,
     MVN_ARM_BODIES,
-    T1_MOCAP_JOINT_RANGES,
     LiveRobot,
 )
 from mocap_g1.live_safety import (
@@ -185,7 +184,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--bind", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=5555)
     parser.add_argument("--source-ip", default=None)
-    parser.add_argument("--robot", choices=tuple(LIVE_ROBOTS), default="unitree_g1")
+    parser.add_argument("--robot", choices=tuple(LIVE_ROBOTS), default="booster_k1")
     parser.add_argument(
         "--arm-alignment",
         choices=ARM_ALIGNMENTS,
@@ -1030,13 +1029,13 @@ def main(argv: list[str] | None = None) -> int:
             )
         safety = LiveG1SafetyController(limits, safety_config)
     else:
-        if robot.key == "unitree_g1":
+        if robot.joint_ranges is None:
             urdf = load_official_joint_limits(args.limits_urdf)
             joint_ranges = tuple(
                 (name, urdf[name].lower, urdf[name].upper) for name in G1_29DOF_JOINTS
             )
         else:
-            joint_ranges = T1_MOCAP_JOINT_RANGES
+            joint_ranges = robot.joint_ranges
         try:
             # Simulation only: bound by the exact joint ranges.  A hardware margin
             # would clamp joints whose neutral sits at a limit (T1 knees, elbow yaw),

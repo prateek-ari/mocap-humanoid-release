@@ -79,8 +79,9 @@ Run stages sequentially; every stage binds the same UDP port.
 
   acceptance  Grade 30 seconds of MXTP02+MXTP20 from the configured Windows IP
   ros2        Publish the accepted stream as ROS 2 topics
-  gmr         Show the live retargeted robot in MuJoCo (--robot unitree_g1 or
-              booster_t1_29dof; N or --calibrate-after SECONDS: neutral calibration)
+  gmr         Show the live retargeted robot in MuJoCo (--robot booster_k1 (default),
+              unitree_g1 or booster_t1_29dof; N or --calibrate-after SECONDS: neutral
+              calibration)
 
 Environment:
   XSENS_SOURCE_IP=<current Windows Xsens-facing IPv4> (required for acceptance/GMR)

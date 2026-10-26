@@ -30,6 +30,12 @@ from typing import Any
 import numpy as np
 
 ARM_SEGMENTS = ("UpperArm", "Forearm", "Hand")
+#: Upper arm, forearm and hand of each side in GMR's live (``xsens_mvn``) and
+#: recorded (``bvh_xsens``) source frames.
+MVN_ARMS = {side: tuple(f"{side}_{segment}" for segment in ARM_SEGMENTS)
+            for side in ("Left", "Right")}
+BVH_ARMS = {side: (f"{side}Shoulder", f"{side}Elbow", f"{side}Wrist")
+            for side in ("Left", "Right")}
 
 
 def _quat_matrix(wxyz) -> np.ndarray:
@@ -56,18 +62,21 @@ def _quat_multiply(a, b) -> np.ndarray:
     )
 
 
-def abduct_arms(scaled: dict, degrees: float, *, chest: str = "Chest") -> dict[str, tuple]:
+def abduct_arms(scaled: dict, degrees: float, *, chest: str = "Chest", root: str = "Pelvis",
+                arms: dict[str, tuple[str, ...]] = MVN_ARMS) -> dict[str, tuple]:
     """Return arm targets rotated outward about each shoulder (left +, right -)."""
-    forward = _quat_matrix(scaled[chest][1])[:, 0]
+    # A robot without a waist (K1) scales no chest: its shoulders turn with the pelvis.
+    forward = _quat_matrix(scaled[chest if chest in scaled else root][1])[:, 0]
     moved: dict[str, tuple] = {}
     for side, sign in (("Left", 1.0), ("Right", -1.0)):
         angle = math.radians(degrees) * sign
         half = angle / 2.0
         rotation = np.array([math.cos(half), *(math.sin(half) * forward)])
         matrix = _quat_matrix(rotation)
-        shoulder = np.asarray(scaled[f"{side}_UpperArm"][0], dtype=np.float64)
-        for segment in ARM_SEGMENTS:
-            name = f"{side}_{segment}"
+        shoulder = np.asarray(scaled[arms[side][0]][0], dtype=np.float64)
+        for name in arms[side]:
+            if name not in scaled:  # e.g. the K1 has no hand target
+                continue
             position, orientation = scaled[name]
             moved[name] = (
                 shoulder + matrix @ (np.asarray(position, dtype=np.float64) - shoulder),
@@ -93,9 +102,11 @@ def abduct_frame_rotations(frame: dict, degrees: float) -> dict:
 class ArmAbduction:
     """Wraps a GMR retargeter's ``update_targets`` to abduct the arm targets."""
 
-    def __init__(self, retargeter: Any, degrees: float) -> None:
+    def __init__(self, retargeter: Any, degrees: float, **names: Any) -> None:
         self.retargeter = retargeter
         self.degrees = float(degrees)
+        #: ``chest``, ``root`` and ``arms`` of :func:`abduct_arms` (default: live names).
+        self.names = names
         self._update_targets = retargeter.update_targets
         retargeter.update_targets = self.update_targets
 
@@ -105,7 +116,8 @@ class ArmAbduction:
 
         retargeter = self.retargeter
         scaled = retargeter.scaled_human_data
-        for name, (position, orientation) in abduct_arms(scaled, self.degrees).items():
+        for name, (position, orientation) in abduct_arms(scaled, self.degrees,
+                                                         **self.names).items():
             scaled[name] = (position, orientation)
             target = mink.SE3.from_rotation_and_translation(mink.SO3(orientation), position)
             for table in (retargeter.human_body_to_task1, retargeter.human_body_to_task2):

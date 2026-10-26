@@ -114,7 +114,7 @@ Now follow setup guide steps 03–07: enter the real session values in the Setup
 
 ## Replay a real recording
 
-This plays a real Xsens take, exported as BVH with the 3DS Max preset, into the live viewer as if the suit were streaming it, for either robot. It needs the recorded runtime from the installer (option 2) because the replayer loads the BVH with GMR, and a local desktop. It uses loopback, so it runs the viewer directly rather than through `live_operator.sh`, which rejects loopback sources.
+This plays a real Xsens take, exported as BVH with the 3DS Max preset, into the live viewer as if the suit were streaming it, for any robot (the K1 by default). It needs the recorded runtime from the installer (option 2) because the replayer loads the BVH with GMR, and a local desktop. It uses loopback, so it runs the viewer directly rather than through `live_operator.sh`, which rejects loopback sources.
 
 Terminal A, the live viewer (`--calibrate-after 0.5` applies the N calibration automatically; start the replay at a moment where the performer stands still):
 
