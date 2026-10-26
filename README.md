@@ -22,9 +22,9 @@ Run the live simulation on the same Windows PC as Xsens Humanoid. No Ubuntu PC, 
 
 ### Install
 
-**[Download Mocap Humanoid for Windows 0.1.0.5](https://files.catbox.moe/jyfv0s.zip)** (104 MB zip, no Internet needed to install)
+**[Download Mocap Humanoid for Windows 0.1.0.12](https://github.com/prateek-ari/mocap-humanoid-release/releases/download/windows-app-v0.1.0.12/MocapHumanoid-Setup-0.1.0.12.exe)** (122 MB, no Internet needed to install)
 
-1. Right-click the downloaded zip → **Extract All**, then double-click `MocapHumanoid-Setup-0.1.0.5.exe`.
+1. Double-click the downloaded `MocapHumanoid-Setup-0.1.0.12.exe`.
 2. Windows may say *"Windows protected your PC"* because the installer is not signed yet: click **More info → Run anyway**. Allow the administrator prompt, click **Install**, then **Finish**.
 
 Everything the app needs is installed into `C:\Program Files\Mocap Humanoid`, with a **Mocap Humanoid** icon on the desktop and in the Start menu. Uninstall it from **Settings → Apps**.
@@ -35,7 +35,7 @@ Everything the app needs is installed into `C:\Program Files\Mocap Humanoid`, wi
 2. Open **Mocap Humanoid** from the desktop. When its Xsens lamp turns green, choose the robot and the performer's height and press **Start**. The robot follows the performer in a separate window.
 3. With the performer standing still, arms relaxed, click **Calibrate**. **Stop** ends the run; tick **Record video** before Start to save an MP4.
 
-The Windows app 0.1.0.5 offers the Unitree G1 and Booster T1. The Booster K1 runs on Ubuntu and in the [Windows one-PC setup](docs/windows-setup.md); the next app build adds it.
+The app offers the Booster K1 (the default), Unitree G1 and Booster T1. Older builds offer only the G1 and T1: install 0.1.0.12 over them.
 
 Details and troubleshooting: [Windows app guide](docs/windows-app.md). The app is new: it passed automated tests on a clean Windows machine but has not yet been used with a real suit.
 

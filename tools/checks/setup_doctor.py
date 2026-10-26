@@ -385,7 +385,8 @@ def _windows_runtime_checks(workspace: Path, env: dict[str, str] | None = None) 
     return checks
 
 
-def _windows_live_checks(env: dict[str, str], workspace: Path | None) -> list[dict[str, str]]:
+def _windows_live_checks(env: dict[str, str], workspace: Path | None,
+                         robot: str) -> list[dict[str, str]]:
     checks = [_windows_source_check(env.get("XSENS_SOURCE_IP", ""))]
     raw_port = env.get("XSENS_UDP_PORT", "5555")
     try:
@@ -400,7 +401,7 @@ def _windows_live_checks(env: dict[str, str], workspace: Path | None) -> list[di
     else:
         checks.append(_check("udp_port", "block", f"Invalid XSENS_UDP_PORT={raw_port!r}",
                              '$env:XSENS_UDP_PORT = "5555"'))
-    checks.extend(_workspace_checks(workspace, "unitree_g1", windows=True, env=env))
+    checks.extend(_workspace_checks(workspace, robot, windows=True, env=env))
     if workspace is not None:
         checks.extend(_windows_runtime_checks(workspace, env))
     gpu = shutil.which("nvidia-smi")
@@ -514,7 +515,7 @@ def diagnose(profile: str, *, workspace: Path | None = None,
         checks.extend(_optional_modules(("fastapi", "uvicorn"), "operator", windows=windows, app=app))
     if profile == "live":
         if windows:
-            checks.extend(_windows_live_checks(env, workspace or _default_workspace(env)))
+            checks.extend(_windows_live_checks(env, workspace or _default_workspace(env), robot))
         else:
             checks.extend(_live_checks(env))
     report: dict[str, object] = {

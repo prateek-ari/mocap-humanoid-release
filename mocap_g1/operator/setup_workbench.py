@@ -1678,7 +1678,8 @@ class SetupWorkbench:
             doctor = str(self.repo_root / "tools" / "checks" / "setup_doctor.py")
             if session["route"] == "live":
                 if self.windows:
-                    return [sys.executable, doctor, "live", "--workspace", session["mocap_ws"]]
+                    return [sys.executable, doctor, "live", "--workspace", session["mocap_ws"],
+                            "--robot", session["robot"]]
                 return [sys.executable, doctor, "live"]
             return [sys.executable, doctor, "recorded", "--workspace", session["mocap_ws"],
                     "--robot", session["robot"]]

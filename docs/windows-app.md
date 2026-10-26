@@ -1,12 +1,13 @@
 # Mocap Humanoid for Windows: install and use
 
 One installer, one app. Install **Mocap Humanoid** on the Windows PC that runs Xsens Humanoid,
-open it from the desktop, and drive the simulated Unitree G1 or Booster T1 from the live suit. No
-Python, PowerShell, ZIP files or browser tabs are involved.
+open it from the desktop, and drive the simulated Booster K1 (the default), Unitree G1 or
+Booster T1 from the live suit. No Python, PowerShell, ZIP files or browser tabs are involved.
 
-> **Status (2026-10-14):** new. The installer passed automated tests on a clean Windows test
-> machine: install and upgrade, firewall rule, shortcuts, the app window, the stream lamp, stream
-> check and live-simulation controls with synthetic Xsens data, and uninstall. Not yet verified:
+> **Status (2026-10-26, build 0.1.0.12):** adds the Booster K1 as the default robot. The installer
+> passed automated tests on a clean Windows test machine, with the K1: install and upgrade,
+> firewall rule, shortcuts, the app window, the stream lamp, stream check and live-simulation
+> controls with synthetic Xsens data, and uninstall. Not yet verified:
 > the MuJoCo window on a real GPU, real Xsens Humanoid streaming, and capture performance with
 > both programs on one PC. The first session on the capture PC is the acceptance test.
 
@@ -19,22 +20,23 @@ Python, PowerShell, ZIP files or browser tabs are involved.
 
 ## 1 · Install
 
-1. Download [Mocap Humanoid for Windows 0.1.0.5](https://files.catbox.moe/jyfv0s.zip) (104 MB zip) and right-click it →
-   **Extract All**. SHA-256: zip `60fb981ffe5f752301e63eb28d3b1af41b9e6cff23e1243257caddc37c5da7c2`, installer `4d9e67f2765205d242ebf2210047d751d615555d49c721f4d36b18bcfd8b1eed`.
-2. Double-click `MocapHumanoid-Setup-0.1.0.5.exe`. The installer is not code-signed yet, so Windows may show *"Windows protected
+1. Download [Mocap Humanoid for Windows 0.1.0.12](https://github.com/prateek-ari/mocap-humanoid-release/releases/download/windows-app-v0.1.0.12/MocapHumanoid-Setup-0.1.0.12.exe) (122 MB; all builds:
+   [releases](https://github.com/prateek-ari/mocap-humanoid-release/releases)). SHA-256:
+   `c4670202f67ab5220ebdf297c6095bb11a3b12ad19df7805c7d18b6e30d8b4d4`.
+2. Double-click `MocapHumanoid-Setup-0.1.0.12.exe`. The installer is not code-signed yet, so Windows may show *"Windows protected
    your PC"*: click **More info → Run anyway**.
 3. Allow the administrator prompt, click **Install**, then **Finish** (leave *Launch Mocap
    Humanoid* ticked).
 
 The installer puts everything in `C:\Program Files\Mocap Humanoid`: its own Python, MuJoCo, GMR
-with the G1 and T1 models, and the app. It also adds:
+with the K1, G1 and T1 models, and the app. It also adds:
 
 - **Mocap Humanoid** to the Start menu and the desktop;
 - a Windows Firewall rule that lets the app receive Xsens on UDP 5555 from another PC on private
   networks (Xsens on the same PC needs no rule; the app then listens on `127.0.0.1` only);
 - an entry in **Settings → Apps** to uninstall it.
 
-Everything has default settings: robot G1, performer height 1.75 m, Xsens on this PC, port 5555,
+Everything has default settings: robot K1, performer height 1.75 m, Xsens on this PC, port 5555,
 sessions in `C:\Users\<you>\mocap-sessions`. Change them in the app.
 
 *Install for me only* (offered when you are not an administrator) works too, but adds no firewall
