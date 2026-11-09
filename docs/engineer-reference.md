@@ -9,7 +9,7 @@ Details behind the [step-by-step setup guide](engineer-setup-guide.md). Use the 
 | Real suit → live UDP → MuJoCo | Implemented; commission with real-stream acceptance | Implemented; commission with real-stream acceptance | Implemented (simulation only); commission with real-stream acceptance |
 | Real recording → 3DS Max BVH → MuJoCo | Implemented with project K1 mapping (config arms) | Implemented | Implemented with project T1 mapping |
 | Browser operator console | Setup console and passive MP4 review; no K1 virtual simulator | Passive MP4 review or virtual G1 NPZ simulation | Passive MP4 review; no T1 virtual simulator |
-| Physical robot control | Not part of this release | Outside this guide; whole-body authority remains locked | Simulation comparator only |
+| Physical robot control | Arm bridge built and tested on a fake robot; locked until the step-by-step hardware tests (`tools/control/k1_commission.py`, [K1 hardware test guide](k1-bringup-runbook.md)) write its acceptance record | Outside this guide; whole-body authority remains locked | Simulation comparator only |
 
 **What is proven:** recorded G1/T1 previews, synthetic live/ROS ingest, and live G1/T1 retargeting of a real recorded take replayed as MXTP02 (no hand/arm overlap with the hips on either robot, about 59 FPS). **What is outstanding:** real MXTP02/MXTP20 stream acceptance and full reviewed Xsens offsets. Existing demonstration takes remain preview-grade. MuJoCo here shows kinematic motion; it does not prove standing balance or a tracking controller. A physical robot is optional and later.
 

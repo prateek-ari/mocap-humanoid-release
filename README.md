@@ -7,7 +7,7 @@ You can use it in two ways:
 - **Live:** the robot follows the performer in real time.
 - **Recorded:** turn a saved Xsens take into a robot video.
 
-Everything happens in simulation. No real robot is connected.
+Everything happens in simulation. No real robot is connected. Testing a real Booster K1 is a separate, later step: see [Testing on the real Booster K1](#testing-on-the-real-booster-k1).
 
 Choose your setup: **[Windows](#windows)** (one PC, Xsens and the simulation together, easiest) or **[Ubuntu](#ubuntu)** (a second PC runs the simulation).
 
@@ -71,6 +71,12 @@ The Setup console walks you through every step with buttons: enter the session d
 
 **G1 and T1 side by side:** to drive both robots from one suit in one window, load your saved session and run `bash docker/gmr-live/run-compare.sh --calibrate-after 5` from the project folder. Step 07 of the setup guide has the exact commands.
 
+## Testing on the real Booster K1
+
+When a Booster K1 is on site, test it step by step before it replays any motion. The script `tools/control/k1_commission.py` takes the robot through twelve small steps on a hoist: PC check, read-only probe and 3D mirror, zero check, takeover and release, hold, balance, command loss, joint signs, gains, and the acceptance record. Each step shows its plan before the robot moves, stops and releases the arms when a check fails, and saves its evidence. The acceptance record unlocks the K1 arm replay (`tools/control/k1_arm_bridge.py`). Every step can be practised first on a fake robot.
+
+You need an Ubuntu PC wired to the robot (the Windows app cannot drive it), a hoist and two people. Install with `bash tools/setup/install.sh recorded --with-booster`, then follow the **[K1 hardware test guide](docs/k1-bringup-runbook.md)** word for word. Nothing in this code has run on a real K1 yet.
+
 ## Guides
 
 - **[Windows app guide](docs/windows-app.md)**: install and use the Windows app, and fix common problems.
@@ -78,6 +84,7 @@ The Setup console walks you through every step with buttons: enter the session d
 - **[Windows and Xsens setup](docs/windows-xsens-humanoid-setup.md)**: preparing the suit and streaming on the Windows PC.
 - **[Windows one-PC setup](docs/windows-setup.md)**: the project's own Windows install, including recorded takes.
 - **[Testing without a suit](docs/testing-without-suit.md)**: check the installation before the suit is connected.
+- **[K1 hardware test guide](docs/k1-bringup-runbook.md)**: test a real Booster K1 step by step on a hoist.
 - **[Engineering reference](docs/engineer-reference.md)**: troubleshooting and details, if something goes wrong.
 
 Something not working on Ubuntu? See step 12 of the setup guide, **Fix common problems**. On Windows, see the troubleshooting table in the [Windows app guide](docs/windows-app.md).

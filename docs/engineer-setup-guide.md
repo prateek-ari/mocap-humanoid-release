@@ -25,7 +25,7 @@ You need:
 
 **How this guide works:** you use the terminal once, to install (step 02). Every later Linux step is done by clicking in the **Setup console**, a page in your browser on the Ubuntu PC. On Windows you work in Xsens Humanoid itself. The few remaining terminal commands are marked, and the console shows them ready to copy.
 
-Simulation shows motion only. It does not prove balance or approve robot hardware. Real-robot control is a separate, later stage (see step 11).
+Simulation shows motion only. It does not prove balance or approve robot hardware. Real-robot control is a separate, later stage (see step 13).
 
 ## 02 · Install on the Ubuntu PC
 
@@ -248,7 +248,7 @@ Open **10 Watch and record** and choose **Preview** or **Arm-aligned**.
 
 For the next take, go back to step 03 and click **New session**. Closing the browser tab leaves the console running in the background, ready for the menu entry; to stop it, run `bash tools/setup/open_console.sh --stop` in the project folder.
 
-Nothing here approves physical robot use. Connecting a real robot is optional, later, and not covered by this guide; the live viewer's `--g1-hardware-envelope` previews the speed-limited commands a real G1 would receive. This release does not control a physical Booster K1.
+Nothing here approves physical robot use. Connecting a real robot is optional and later. The Booster K1 needs the [K1 hardware test guide](k1-bringup-runbook.md) (step 13): its arm bridge stays locked until the hoisted day-one tests are written into an acceptance record. The live viewer's `--g1-hardware-envelope` previews the speed-limited commands a real G1 would receive.
 
 ## 12 · Fix common problems
 
@@ -275,3 +275,17 @@ Nothing here approves physical robot use. Connecting a real robot is optional, l
 | Robot shakes or lags only with `--g1-hardware-envelope` | Expected: that mode applies real-robot speed limits. It is not used by the Setup console. |
 
 Prefer the terminal, or working over SSH without a desktop? Every step has a command-line equivalent: `bash tools/setup/new_session.sh` writes the same `session.env`, and the other commands are listed under [terminal equivalents](engineer-reference.md#terminal-equivalents-of-the-setup-console) in the engineering reference. Everything else, including Docker/NVIDIA details, the ROS 2 topics check, full calibration and what to send when asking for help, is there too.
+
+## 13 · Test on the real K1 (later)
+
+This step is for the day the Booster K1 is on site. It moves a real robot, so follow the [K1 hardware test guide](k1-bringup-runbook.md) word for word; this is only the overview.
+
+1. **People and equipment:** the robot hangs in a hoist; a second person holds the Booster remote (LT+BACK = damping) during every motion; a protractor.
+2. **PC:** an Ubuntu 22.04 or 24.04 PC wired to the robot, address `192.168.10.10/24`. The Windows app cannot drive the robot (the Booster SDK is Linux-only).
+3. **Robot facts first:** check the robot's IP address (Booster default `192.168.10.102`), firmware (the SDK expects 1.8.0), DDS domain, serial number and the remote's emergency stop against Booster's manual. The guide's table "What to find out about the robot first" lists each one.
+4. **Install:** `bash tools/setup/install.sh recorded --with-booster`.
+5. **Practise first:** run every step on the practice robot: `.venv/bin/python tools/control/k1_commission.py probe --model ~/mocap-runtime/GMR/assets/booster_k1/K1_serial.xml`, then follow the **Next:** line each step prints.
+6. **On the robot:** the same steps with `--transport booster --net 192.168.10.10` on `preflight` and `probe`: probe, mirror, zero-check, quick-release, hold, balance, command-loss, signs, gains, record. Each step shows its plan and waits for `yes` before the robot moves, and stops and releases the arms when a check fails.
+7. **Status:** `.venv/bin/python tools/control/k1_commission.py status --session <folder>` shows which steps passed and what to run next.
+
+If a step fails, read its **What to check** line and the guide's failure table before you run it again.

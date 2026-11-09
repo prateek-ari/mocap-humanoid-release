@@ -28,6 +28,11 @@ operator = [
   # Lists network adapters for the Setup console on Windows (Linux uses `ip`).
   "psutil>=5.9,<8; sys_platform == 'win32'",
 ]
+# Only needed to talk to a physical K1; manylinux_2_34 wheels for x86_64 and
+# aarch64. The version is part of a K1 acceptance record.
+booster = [
+  "booster_robotics_sdk_python==1.6.3",
+]
 
 [project.scripts]
 mocap-g1-console = "mocap_g1.operator.cli:main"

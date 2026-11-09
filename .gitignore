@@ -34,3 +34,5 @@ coverage.xml
 .impeccable/
 skills-lock.json
 /session.env
+# K1 hardware-test sessions (robot evidence; send zipped, do not commit)
+k1-commissioning/

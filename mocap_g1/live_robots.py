@@ -10,7 +10,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from .schema import G1_29DOF_JOINTS, G1_ARM_SDK_JOINTS
+from .arm_collision_profiles import K1_ARM_PROFILE, RobotArmProfile
+from .schema import G1_29DOF_JOINTS, G1_ARM_SDK_JOINTS, JointLimit, load_official_joint_limits
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -86,6 +87,16 @@ K1_JOINT_RANGES: tuple[tuple[str, float, float], ...] = (
 K1_JOINTS = tuple(name for name, _lower, _upper in K1_JOINT_RANGES)
 #: The arms; the K1 has no waist, and its head is not driven by the live IK.
 K1_UPPER_BODY_JOINTS = K1_JOINTS[2:10]
+#: Official velocity (rad/s) and effort (N*m) limits per joint group.
+_K1_LEG_LIMITS = {"Hip_Pitch": (14.66, 68.0), "Hip_Roll": (12.57, 43.0),
+                  "Hip_Yaw": (17.59, 38.3), "Knee_Pitch": (12.57, 112.0),
+                  "Ankle_Pitch": (17.59, 38.3), "Ankle_Roll": (17.59, 38.3)}
+K1_VELOCITY_LIMITS: tuple[tuple[str, float], ...] = (
+    ("AAHead_yaw", 7.85), ("Head_pitch", 7.85),
+    *((name, 33.51) for name in K1_UPPER_BODY_JOINTS),
+    *((f"{side}_{joint}", velocity) for side in ("Left", "Right")
+      for joint, (velocity, _effort) in _K1_LEG_LIMITS.items()),
+)
 
 #: Arm segments of the GMR ``xsens_mvn`` source (MXTP02 converted names).
 MVN_ARM_BODIES = (
@@ -122,6 +133,13 @@ class LiveRobot:
     #: Position ranges of ``dof_joints`` for the simulation bounds; ``None`` (the G1)
     #: reads them from the official URDF.
     joint_ranges: tuple[tuple[str, float, float], ...] | None = None
+    #: URDF with lower, upper and velocity limits for every joint.
+    limits_urdf: Path | None = None
+    #: Upper-body velocity limits (rad/s) when no URDF supplies them.
+    velocity_limits: tuple[tuple[str, float], ...] | None = None
+    #: Arm-versus-body collision pairs for the K1 hardware envelope's contact
+    #: check; ``None`` runs the envelope without one.
+    arm_collision: RobotArmProfile | None = None
 
 
 LIVE_ROBOTS: dict[str, LiveRobot] = {
@@ -139,6 +157,8 @@ LIVE_ROBOTS: dict[str, LiveRobot] = {
         feet=(("left_foot_link", 0.024), ("right_foot_link", 0.024)),
         arm_abduction_deg=22.0,
         joint_ranges=K1_JOINT_RANGES,
+        velocity_limits=K1_VELOCITY_LIMITS,
+        arm_collision=K1_ARM_PROFILE,
     ),
     "unitree_g1": LiveRobot(
         key="unitree_g1",
@@ -173,3 +193,44 @@ LIVE_ROBOTS: dict[str, LiveRobot] = {
         joint_ranges=T1_MOCAP_JOINT_RANGES,
     ),
 }
+
+
+def robot_joint_ranges(
+    robot: LiveRobot, limits_urdf: Path | None = None
+) -> tuple[tuple[str, float, float], ...]:
+    """Position ranges of every joint, from the profile or its limits URDF."""
+    urdf = limits_urdf or robot.limits_urdf
+    if urdf is None:
+        if robot.joint_ranges is None:
+            raise ValueError(f"{robot.label} profile has neither joint ranges nor a limits URDF")
+        return robot.joint_ranges
+    limits = load_official_joint_limits(urdf, robot.dof_joints)
+    return tuple((name, limits[name].lower, limits[name].upper) for name in robot.dof_joints)
+
+
+def robot_envelope_limits(
+    robot: LiveRobot, limits_urdf: Path | None = None
+) -> dict[str, JointLimit]:
+    """Limits of the upper-body joints the hardware envelope guards.
+
+    Raises ``ValueError`` naming the gap when the profile has no velocity
+    limits: the envelope cannot run without them.
+    """
+    urdf = limits_urdf or robot.limits_urdf
+    if urdf is not None:
+        # Load every joint so an incomplete URDF is rejected, not just its guarded part.
+        limits = load_official_joint_limits(urdf, robot.dof_joints)
+        return {name: limits[name] for name in robot.upper_body_joints}
+    if robot.velocity_limits is None:
+        raise ValueError(
+            f"{robot.label} has no joint velocity limits, so it cannot use the hardware envelope"
+        )
+    velocity = dict(robot.velocity_limits)
+    missing = [name for name in robot.upper_body_joints if name not in velocity]
+    if missing:
+        raise ValueError(f"{robot.label} lacks velocity limits for: {', '.join(missing)}")
+    ranges = {name: (lower, upper) for name, lower, upper in robot_joint_ranges(robot)}
+    return {
+        name: JointLimit(lower=ranges[name][0], upper=ranges[name][1], velocity=velocity[name])
+        for name in robot.upper_body_joints
+    }

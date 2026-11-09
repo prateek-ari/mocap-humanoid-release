@@ -69,6 +69,35 @@ G1_TARGET_BODIES = frozenset(
 )
 
 
+#: The Booster K1 (GMR ``K1_serial.xml``): the 23-DOF T1's arm chain under other
+#: names, and no waist, so the trunk is the root body.
+K1_ARM_PROFILE = RobotArmProfile(
+    left_joint_names=(
+        "ALeft_Shoulder_Pitch", "Left_Shoulder_Roll", "Left_Elbow_Pitch", "Left_Elbow_Yaw",
+    ),
+    right_joint_names=(
+        "ARight_Shoulder_Pitch", "Right_Shoulder_Roll", "Right_Elbow_Pitch", "Right_Elbow_Yaw",
+    ),
+    left_arm_bodies=frozenset({"Left_Arm_1", "Left_Arm_2", "Left_Arm_3", "left_hand_link"}),
+    right_arm_bodies=frozenset({"Right_Arm_1", "Right_Arm_2", "Right_Arm_3", "right_hand_link"}),
+    left_distal_bodies=frozenset({"Left_Arm_3", "left_hand_link"}),
+    right_distal_bodies=frozenset({"Right_Arm_3", "right_hand_link"}),
+    target_bodies=frozenset(
+        {"Trunk", "left_foot_link", "right_foot_link"}
+        | {
+            f"{side}_{segment}"
+            for segment in ("Hip_Pitch", "Hip_Roll", "Hip_Yaw", "Shank", "Ankle_Cross")
+            for side in ("Left", "Right")
+        }
+    ),
+    tracked_bodies=(
+        "Left_Arm_2", "Left_Arm_3", "left_hand_link", "Right_Arm_2", "Right_Arm_3", "right_hand_link",
+    ),
+    position_weights=(5.0, 10.0, 10.0, 5.0, 10.0, 10.0),
+    orientation_weights=(20.0, 15.0, 15.0, 20.0, 15.0, 15.0),
+)
+
+
 ROBOT_PROFILES = {
     "booster_t1_29dof": RobotArmProfile(
         left_joint_names=(

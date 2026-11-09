@@ -14,6 +14,8 @@ Options:
   --robot ROBOT         booster_k1 (default), unitree_g1 or booster_t1_29dof (recorded only)
   --python COMMAND      Python >=3.10 to create the project venv (default: python3)
   --with-ros2           Build xsens-ros2:jazzy too (live only)
+  --with-booster        Also install the Booster K1 SDK bindings (Linux; needed only to
+                        test or drive a real K1: docs/k1-bringup-runbook.md)
   --system-packages     Install missing Ubuntu 22.04/24.04 apt prerequisites (uses sudo)
   --dry-run             Print commands without executing or changing anything
   -h, --help            Show this help
@@ -72,6 +74,7 @@ workspace=''
 robot=booster_k1
 python=python3
 with_ros2=0
+with_booster=0
 system_packages=0
 dry_run=0
 robot_given=0
@@ -88,6 +91,7 @@ while (($#)); do
       esac
       shift 2 ;;
     --with-ros2) with_ros2=1; shift ;;
+    --with-booster) with_booster=1; shift ;;
     --system-packages) system_packages=1; shift ;;
     --dry-run) dry_run=1; shift ;;
     -h|--help) usage; exit 0 ;;
@@ -169,6 +173,7 @@ if (( wizard )); then
   printf '\nAbout to run: bash tools/setup/install.sh %s' "$profile"
   [[ $profile != recorded ]] || printf ' --workspace %q --robot %s' "$workspace" "$robot"
   (( ! with_ros2 )) || printf ' --with-ros2'
+  (( ! with_booster )) || printf ' --with-booster'
   (( ! system_packages )) || printf ' --system-packages'
   (( ! dry_run )) || printf ' --dry-run'
   printf '\n'
@@ -267,7 +272,9 @@ if (( ! dry_run )); then
   "$venv_python" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)' ||
     die "existing project venv uses Python <3.10; move .venv aside and rerun setup"
 fi
-run "$venv_python" -m pip install -e "${repo_root}[runtime,operator]"
+extras=runtime,operator
+(( ! with_booster )) || extras+=,booster
+run "$venv_python" -m pip install -e "${repo_root}[${extras}]"
 run "$venv_python" "$repo_root/tools/checks/setup_doctor.py" core --with-operator
 run "$venv_python" "$repo_root/tools/xsens/stream_acceptance.py" --self-test --require-joint-angles
 

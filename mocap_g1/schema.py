@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from collections.abc import Sequence
 from pathlib import Path
 import xml.etree.ElementTree as ET
 
@@ -49,14 +50,17 @@ class JointLimit:
     velocity: float
 
 
-def load_official_joint_limits(urdf_path: str | Path) -> dict[str, JointLimit]:
-    """Load all 29 position/velocity limits and reject incomplete URDFs."""
+def load_official_joint_limits(
+    urdf_path: str | Path, joints: Sequence[str] = G1_29DOF_JOINTS
+) -> dict[str, JointLimit]:
+    """Load position/velocity limits for ``joints`` (default: the G1's 29) and
+    reject incomplete URDFs."""
     root = ET.parse(str(urdf_path)).getroot()
     raw: dict[str, JointLimit] = {}
     for joint in root.iter("joint"):
         name = joint.get("name")
         limit = joint.find("limit")
-        if name not in G1_29DOF_JOINTS or limit is None:
+        if name not in joints or limit is None:
             continue
         try:
             raw[name] = JointLimit(
@@ -67,7 +71,8 @@ def load_official_joint_limits(urdf_path: str | Path) -> dict[str, JointLimit]:
         except KeyError as exc:
             raise ValueError(f"{urdf_path}: joint {name} lacks {exc.args[0]} limit") from exc
 
-    missing = [name for name in G1_29DOF_JOINTS if name not in raw]
+    missing = [name for name in joints if name not in raw]
     if missing:
-        raise ValueError(f"{urdf_path}: missing G1 joint limits: {', '.join(missing)}")
-    return {name: raw[name] for name in G1_29DOF_JOINTS}
+        label = "G1 joint" if tuple(joints) == G1_29DOF_JOINTS else "joint"
+        raise ValueError(f"{urdf_path}: missing {label} limits: {', '.join(missing)}")
+    return {name: raw[name] for name in joints}
