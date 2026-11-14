@@ -1,0 +1,15 @@
+{
+  "name": "@mocap-g1/eslint-typescript",
+  "private": true,
+  "version": "0.0.0",
+  "description": "typescript-eslint pinned to the TypeScript 6 JS API; the console itself compiles with TypeScript 7, which has no compatible JS API.",
+  "type": "module",
+  "main": "index.js",
+  "dependencies": {
+    "typescript": "6.0.3",
+    "typescript-eslint": "8.71.1"
+  },
+  "peerDependencies": {
+    "eslint": "^10.0.0"
+  }
+}
