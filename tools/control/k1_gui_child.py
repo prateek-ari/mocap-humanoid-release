@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
 """Child side of the K1 test GUI (tools/control/k1_commission_gui.py).
 
-Runs ``k1_commission.main`` or ``k1_arm_bridge.main`` unchanged, in this process,
-for the GUI.  The GUI starts it with stdout and stderr on a log file (never a
-pipe: a dead GUI must not break a ``print`` on the release path) and stdin on a
-pipe.  What this wrapper adds:
+Runs ``k1_commission.main``, ``k1_arm_bridge.main`` or ``k1_live_bridge.main``
+unchanged, in this process, for the GUI.  The GUI starts it with stdout and
+stderr on a log file (never a pipe: a dead GUI must not break a ``print`` on the
+release path) and stdin on a pipe.  What this wrapper adds:
 
 - the parent-death signal: if the GUI dies, this process gets SIGINT, the same
   as Ctrl-C, so the tool's own stop-and-release path runs;
 - structured prompts: every question becomes one ``@@K1GUI`` event line with an
   id, and only a stdin line ``<id><TAB><answer>`` answers it;
 - ``session`` and ``attempt`` events, so the GUI binds each run to its evidence;
+- ``live`` status events from the live bridge (rate, source age, state, release);
 - on the fake robot only: ``rpc`` events, and test hooks (``K1_GUI_TEST_*``).
 """
 
@@ -127,7 +128,12 @@ def install_hooks(tool_name: str, argv: list[str]) -> None:
     fake.upper_body_control = rpc  # type: ignore[method-assign]
     fake.publish = publish  # type: ignore[method-assign]
 
-    if tool_name == "commission":
+    if tool_name == "live":  # the window's live status panel
+        from tools.control import k1_live_bridge
+
+        k1_live_bridge.STATUS = lambda fields: emit("live", **fields)
+
+    if tool_name in ("commission", "live"):  # the live bridge asks through k1_commission
         from tools.control import k1_commission as tool
 
         def ask(question: str) -> str:
@@ -165,7 +171,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--parent-pid", type=int, required=True)
-    parser.add_argument("--tool", choices=("commission", "replay"), required=True)
+    parser.add_argument("--tool", choices=("commission", "replay", "live"), required=True)
     parser.add_argument("args", nargs=argparse.REMAINDER)
     options = parser.parse_args(argv)
     args = options.args[1:] if options.args[:1] == ["--"] else options.args
@@ -182,6 +188,8 @@ def main(argv: list[str] | None = None) -> int:
         install_hooks(options.tool, args)
         if options.tool == "commission":
             from tools.control import k1_commission as tool
+        elif options.tool == "live":
+            from tools.control import k1_live_bridge as tool  # type: ignore[no-redef]
         else:
             from tools.control import k1_arm_bridge as tool  # type: ignore[no-redef]
         code = int(tool.main(args))

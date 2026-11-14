@@ -190,6 +190,39 @@ def validate_qpos(qpos: np.ndarray, expected_nq: int, *, tolerance: float = 1e-3
         )
 
 
+def clamp_official_limits(
+    robot: str, dof_names: list[str], dof_pos: np.ndarray
+) -> tuple[np.ndarray, dict[str, Any] | None]:
+    """The K1's joint values clamped to its official limits (the envelope's), and
+    what was clamped; other robots pass through unchanged with ``None``."""
+
+    values = np.ascontiguousarray(dof_pos, dtype=np.float64)
+    if robot != "booster_k1":
+        return values, None
+    from mocap_g1.live_robots import LIVE_ROBOTS, robot_joint_ranges
+
+    profile = LIVE_ROBOTS[robot]
+    if list(dof_names) != list(profile.dof_joints):
+        raise RetargetError("the K1 MJCF joints differ from the K1 profile's joint order")
+    ranges = robot_joint_ranges(profile)
+    lower = np.array([low for _name, low, _high in ranges])
+    upper = np.array([high for _name, _low, high in ranges])
+    clamped = np.ascontiguousarray(np.clip(values, lower, upper))
+    excess = np.abs(clamped - values)
+    outside = excess > 0
+    return clamped, {
+        "source": ("official: Booster booster_assets K1_22dof.urdf @12a9751 (BSD-3-Clause); "
+                   "ranges intersected with GMR K1_serial.xml"),
+        "clamped": True,
+        "frames_clamped": int(outside.any(axis=1).sum()),
+        "values_clamped": int(outside.sum()),
+        "max_excess_rad": float(excess.max()) if excess.size else 0.0,
+        "joints_clamped": {
+            name: int(count) for name, count in zip(profile.dof_joints, outside.sum(axis=0)) if count
+        },
+    }
+
+
 def _retarget_all_then_decimate(
     retargeter: Any,
     frames: list[dict[str, Any]],
@@ -638,7 +671,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     validate_qpos(qpos, int(model.nq))
     # MuJoCo qpos is wxyz; canonical GMR motion PKLs are xyzw.
     root_rot_xyzw = np.ascontiguousarray(wxyz_to_xyzw(qpos[:, 3:7]))
-    dof_pos = np.ascontiguousarray(qpos[:, 7:])
+    dof_pos, joint_limits = clamp_official_limits(args.robot, hinge_names, qpos[:, 7:])
     source_fps = float(1.0 / frame_time)
     fps = float(source_fps / args.frame_step)
     elapsed = time.perf_counter() - started
@@ -694,6 +727,12 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "arm_mode": arm_mode,
             "arm_abduction_deg": float(args.arm_abduction),
         },
+        "joint_limits": joint_limits,
+        # The K1 arm bridge replays this on the real robot: config arms
+        # read no offsets, the values sit inside the official limits, the model is pinned.
+        "arm_replay_eligible": bool(
+            args.robot == "booster_k1" and arm_mode == "config" and joint_limits is not None
+        ),
         "runtime": {
             "elapsed_s": elapsed,
             "throughput_fps": len(source_qpos) / max(elapsed, 1e-9),

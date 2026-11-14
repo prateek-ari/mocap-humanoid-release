@@ -29,7 +29,7 @@ class SafetyConfig:
     #: closed instead.
     source_future_tolerance_s: float = 0.005
     #: Longest control interval credited as motion time for one command. A
-    #: longer tick (anything short of ``hard_timeout_s``) is treated as a
+    #: longer tick (anything short of ``tick_stall_s``) is treated as a
     #: stall followed by one step of this length, so a loop gap cannot turn
     #: into a ``velocity_cap * dt`` position jump in a single command. The
     #: default is twice the 50 Hz bridge period; slower loops should raise it.
@@ -38,6 +38,16 @@ class SafetyConfig:
     #: collision shapes; deeper candidate commands are braked.  It sits 1 mm
     #: inside ``CONTACT_BOUND_M``, so path sampling at the limit cannot cross it.
     contact_tolerance_m: float = 0.004
+    #: Longest gap between two control ticks before the envelope latches a
+    #: stall (reset from measured state).  ``None`` means ``hard_timeout_s``,
+    #: as before; a live bridge sets it apart from the source timeout so a
+    #: long braking-derived source timeout cannot weaken the stall check.
+    tick_stall_timeout_s: float | None = None
+
+    @property
+    def tick_stall_s(self) -> float:
+        """The effective control-loop stall bound."""
+        return self.hard_timeout_s if self.tick_stall_timeout_s is None else self.tick_stall_timeout_s
 
     def validate(self) -> None:
         """Reject settings which could weaken or disable the safety envelope."""
@@ -52,6 +62,7 @@ class SafetyConfig:
             "source_future_tolerance_s": self.source_future_tolerance_s,
             "max_step_dt_s": self.max_step_dt_s,
             "contact_tolerance_m": self.contact_tolerance_m,
+            "tick_stall_timeout_s": self.tick_stall_s,
         }
         for name, value in values.items():
             if isinstance(value, bool) or not isinstance(value, Real):
@@ -84,6 +95,9 @@ class SafetyConfig:
             )
         if self.contact_tolerance_m < 0.0:
             raise SafetyError("contact_tolerance_m must be non-negative")
+        if self.tick_stall_s <= self.max_step_dt_s:
+            # A stall bound at or below one credited step would fault nominal ticks.
+            raise SafetyError("tick_stall_timeout_s must be greater than max_step_dt_s")
 
 
 @dataclass(frozen=True)
@@ -278,7 +292,7 @@ class ArmSafetyEnvelope:
         dt = now - self._last_time
         if not math.isfinite(dt) or dt <= 0:
             raise SafetyError(f"control time must increase monotonically; dt={dt}")
-        if dt >= self.config.hard_timeout_s:
+        if dt >= self.config.tick_stall_s:
             # No command was emitted during this interval, so the stored state
             # is no longer a trustworthy starting point for another command.
             # Requiring measured-state reset avoids treating the whole gap as

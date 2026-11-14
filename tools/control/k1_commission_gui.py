@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-"""Click-through GUI for the Booster K1 hardware tests (the 12 steps of
+"""Click-through GUI for the Booster K1 hardware tests (the 13 steps of
 docs/k1-bringup-runbook.md).
 
     .venv/bin/python tools/control/k1_commission_gui.py
 
 It never moves the robot itself: each step runs the unchanged command-line tool
-(tools/control/k1_commission.py, and tools/control/k1_arm_bridge.py for step 12)
-in a child process through tools/control/k1_gui_child.py.  The GUI turns the
+(tools/control/k1_commission.py, tools/control/k1_arm_bridge.py for step 12 and
+tools/control/k1_live_bridge.py for step 13) in a child process through
+tools/control/k1_gui_child.py.  It shows the stage ladder of the open session's
+robot (mocap_g1/stage_gate.py) and locks a live stage the gate refuses.  The GUI turns the
 tool's questions into buttons, shows its output live, explains failures, and
 raises a red alarm when a release is not confirmed or a run ends abnormally.
 The real stop is always the Booster remote: LT+BACK (damping).
@@ -33,7 +35,6 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from tools.control.k1_arm_bridge import MANUAL_STOP  # noqa: E402
 from tools.control.k1_commission import (  # noqa: E402
-    DEFAULT_ROOT,
     GAP_LEVELS,
     HOLD_MAX_S,
     ROBOT_IP,
@@ -43,10 +44,17 @@ from tools.control.k1_commission import (  # noqa: E402
     hint,
     ladder,
 )
+from tools.control import k1_live_bridge as live  # noqa: E402
 from tools.control.k1_gui_child import MARK  # noqa: E402
+from mocap_g1.stage_gate import STAGES, Ledger, StageGateError, commissioning_root, entry_problems  # noqa: E402
 
 CHILD = Path(__file__).with_name("k1_gui_child.py")
-ROOT = REPO_ROOT / DEFAULT_ROOT
+SENDER = Path(__file__).with_name("k1_live_synth.py")
+ROOT = commissioning_root()
+#: Step 13's "Run" choices and the bridge's --drill value of each.
+LIVE_DRILLS = {"Following": None, "Stream-loss drill": "stream-loss", "STOP drill": "stop"}
+#: The practice sender outlives any run (gate wait + time limit); it is stopped with the step.
+SENDER_SECONDS = live.MAX_TIME_LIMIT_S + 2 * live.GATE_WAIT_S + 60
 MOTION = ("quick-release", "hold", "balance", "command-loss", "signs", "gains")
 REPLAY_MAX_S = 30.0
 
@@ -79,6 +87,10 @@ STEPS: list[tuple[str, str, str, str]] = [
     ("replay", "12 · First real replay", "Replays a short, slow, qualified recording with the "
      "approved limits from the record. Qualify the recording first (guide, step 12).",
      "The recording"),
+    ("live", "13 · Live arms", "The arms follow the performer in the suit, streamed by the live "
+     "tool (--robot-stream). The arms take over only when the performer's arms match the "
+     "robot's; STOP slows them down and hands them back. Run following attempts and both "
+     "drills, then Evaluate stage.", "The performer's arm motion"),
 ]
 TITLES = {key: title for key, title, _what, _moves in STEPS}
 
@@ -121,6 +133,10 @@ class StepRunner:
     attempt: dict[str, Any] | None = None
     bridge_state: str | None = None
     rpc: list[bool] = field(default_factory=list)
+    #: The newest ``live`` status of the live bridge (step 13).
+    live: dict[str, Any] | None = None
+    #: Helpers (the practice sender) stopped when this run has ended.
+    companions: list[Any] = field(default_factory=list)
     _reader: Any = None
     _partial: str = ""
     _drained: bool = False
@@ -173,6 +189,8 @@ class StepRunner:
                 items.append(("line", line))
         if exited:
             self.prompt = None
+            for companion in self.companions:
+                companion.stop()
         return items
 
     def _handle(self, event: dict[str, Any]) -> None:
@@ -188,6 +206,8 @@ class StepRunner:
             self.rpc.append(bool(event["enable"]))
         elif kind == "exit":
             self.bridge_state = event.get("bridge_state")
+        elif kind == "live":
+            self.live = event
 
     def answer(self, prompt_id: int, text: str) -> bool:
         """Send one answer to the open question; refuses stale ids, repeats and newlines."""
@@ -221,7 +241,7 @@ class StepRunner:
                 verdict = "INCOMPLETE"
         if verdict is None:
             if code == 0:
-                verdict = "PASS" if self.step in ("preflight", "replay") else "DONE"
+                verdict = "PASS" if self.step in ("preflight", "replay", "live") else "DONE"
             elif code == 1:
                 verdict = "FAIL"
             elif code == 2:
@@ -251,6 +271,178 @@ class StepRunner:
                             if line.startswith(("REFUSED:", "ERROR:"))), "")
             found = hint(refused.split(":", 1)[1].strip()) if refused else ""
         return RunResult(verdict, alarm, found)
+
+
+@dataclass
+class PracticeSender:
+    """tools/control/k1_live_synth.py streaming to the live bridge: practice without the suit.
+
+    Its own child, stopped with the step (or by the operator: the stream-loss drill)."""
+
+    port: int
+    log_path: Path
+    model: str | None = None
+    process: subprocess.Popen[bytes] | None = None
+
+    def start(self) -> None:
+        self.log_path.parent.mkdir(parents=True, exist_ok=True)
+        argv = [sys.executable, "-u", str(SENDER), "--port", str(self.port), "--seconds",
+                f"{SENDER_SECONDS:g}", *(["--model", self.model] if self.model else [])]
+        with self.log_path.open("w", encoding="utf-8") as log:
+            self.process = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=log,
+                                            stderr=subprocess.STDOUT, cwd=REPO_ROOT,
+                                            preexec_fn=_die_with_window)
+
+    @property
+    def running(self) -> bool:
+        return self.process is not None and self.process.poll() is None
+
+    def stop(self, timeout: float = 5.0) -> None:
+        if not self.running or self.process is None:
+            return
+        self.process.send_signal(signal.SIGINT)
+        try:
+            self.process.wait(timeout)
+        except subprocess.TimeoutExpired:
+            self.process.kill()
+            self.process.wait()
+
+
+def _die_with_window() -> None:
+    """In the sender child before exec: SIGINT when the window dies (like k1_gui_child)."""
+    import ctypes
+
+    ctypes.CDLL(None).prctl(1, int(signal.SIGINT), 0, 0, 0)  # PR_SET_PDEATHSIG
+
+
+def bounded(label: str, text: str, low: float, high: float) -> str:
+    try:
+        value = float(text)
+    except ValueError:
+        raise ValueError(f"{label}: not a number") from None
+    if not low <= value <= high:
+        raise ValueError(f"{label}: must be {low:g} to {high:g}")
+    return f"{value:g}"
+
+
+def live_command(session: Path, meta: dict[str, Any], *, stage: str, time_limit: str, port: str,
+                 drill: str, operator: str = "", evaluate: bool = False,
+                 attested: str = "", record: Path | None = None) -> list[str]:
+    """The k1_live_bridge.py arguments of step 13 (a run, or ``--evaluate``)."""
+    if stage not in ("hoist", "standing"):
+        raise ValueError("stage: choose hoist or standing")
+    args = ["--session", str(session), "--stage", stage]
+    if evaluate:
+        if not operator.strip():
+            raise ValueError("type your name as the operator: it signs the ledger entry")
+        return [*args, "--evaluate", "--operator", operator.strip()]
+    if drill not in LIVE_DRILLS:
+        raise ValueError("run: choose Following or a drill")
+    args += ["--time-limit", bounded("time limit", time_limit, 1, live.MAX_TIME_LIMIT_S),
+             "--port", bounded("port", port if port.strip().isdigit() else "x", 1024, 65535)]
+    if LIVE_DRILLS[drill]:
+        args += ["--drill", str(LIVE_DRILLS[drill])]
+    if attested.strip():
+        args += ["--attested-robot-id", attested.strip()]
+    if meta.get("transport") == "booster":
+        if record is None:
+            raise ValueError("no k1-acceptance.json in this session: run 11 · Record")
+        args += ["--acceptance-record", str(record)]
+    return args
+
+
+def sender_model(meta: dict[str, Any]) -> str | None:
+    """The practice sender sends the hash of the model the bridge uses (the session's)."""
+    return str(meta["model_path"]) if meta.get("model_sha256") and meta.get("model_path") else None
+
+
+LIVE_COLOURS = {"following": "valid", "lag-hold": "incomplete", "stopping": "incomplete",
+                "waiting": "info", "aligning": "info", "released": "none"}
+
+
+def live_status_text(event: dict[str, Any]) -> tuple[str, str]:
+    """``(lamp kind, two lines)`` for the live status panel from one ``live`` event."""
+    def number(key: str, form: str) -> str:
+        value = event.get(key)
+        return "-" if value is None else form.format(value)
+
+    state = str(event.get("state"))
+    head = f"LIVE ARMS {event.get('stage')}: {state.upper()}"
+    if event.get("drill"):
+        head += f"  (drill: {event['drill']})"
+    if state == "waiting" and event.get("gate"):
+        head += f"  - {event['gate']}"
+    if state == "lag-hold":
+        head += "  - performer too fast: holding, then re-aligning"
+    if event.get("trigger"):
+        head += f"  - ended by {event['trigger']}"
+    enabled = event.get("enabled")
+    line = (f"stream {number('rate_hz', '{:.0f}')} Hz   age {number('source_age_s', '{:.3f}')} s   "
+            f"epoch {number('epoch', '{}')}   tracking "
+            f"{'-' if enabled is None else 'on' if enabled else 'OFF'}   worst gap "
+            + (f"{event['worst_joint']} {number('worst_gap_rad', '{:.2f}')} rad   "
+               if event.get("worst_joint") else "-   ")
+            + f"following {number('following_s', '{:.0f}')}/{number('time_limit_s', '{:.0f}')} s   "
+            f"release {event.get('release', '-')}")
+    kind = LIVE_COLOURS.get(state, "bad")  # fault_latched, release_unconfirmed, ...
+    if event.get("release") == "failed":
+        kind = "bad"
+    return kind, f"{head}\n{line}"
+
+
+# -- the stage ladder -------------------------------------------------------------
+
+
+def session_ledger(meta: dict[str, Any], root: Path | None = None) -> Ledger:
+    """The ledger of the session's robot; a practice session's is the PRACTICE ledger."""
+    return Ledger(root or ROOT, str(meta.get("serial")), practice=bool(meta.get("practice")))
+
+
+def ladder_rows(ledger: Ledger, identity: dict[str, str],
+                now: dt.datetime | None = None) -> list[tuple[str, str, str, str]]:
+    """``(stage, title, kind, text)`` per stage; kind is passed, invalid, revoked, locked,
+    ready or practice.  The run's settings are compared when it starts (not here)."""
+    try:
+        ledger.entries()
+    except StageGateError as exc:
+        return [(key, spec.title, "invalid", str(exc)) for key, spec in STAGES.items()]
+    rows = []
+    for key, spec in STAGES.items():
+        latest = ledger.latest(key)
+        verdict = latest.get("verdict") if latest else None
+        date = str(latest.get("date", ""))[:10] if latest else ""
+        if verdict == "REVOKED":
+            assert latest is not None
+            rows.append((key, spec.title, "revoked", f"revoked {date}: {latest.get('reason')}"))
+        elif ledger.practice:
+            rows.append((key, spec.title, "practice", f"practice pass {date} (unlocks nothing)"
+                         if verdict == "PASS" else "practice: not passed"))
+        elif verdict == "PASS":
+            problems = entry_problems(key, ledger=ledger, identity=identity, now=now)
+            rows.append((key, spec.title, "invalid", f"passed {date}, no longer valid: {problems[0]}")
+                        if problems else (key, spec.title, "passed", f"passed {date}"))
+        else:
+            problems = [p for gate in spec.gate
+                        for p in entry_problems(gate, ledger=ledger, identity=identity, now=now)]
+            rows.append((key, spec.title, "locked", f"locked: {problems[0]}") if problems
+                        else (key, spec.title, "ready", "not passed; its gate is open"))
+    return rows
+
+
+LADDER_LAMP = {"passed": "valid", "invalid": "bad", "revoked": "bad", "locked": "none",
+               "ready": "none", "practice": "info"}
+
+
+def ladder_lamp(rows: list[tuple[str, str, str, str]], kind: str) -> tuple[str, str] | None:
+    """Step 12 (``replay``) or 13 (``live-arms``) evidence from the ledger rows."""
+    mine = [row for row in rows if row[0].startswith(kind + "@")]
+    if not mine:
+        return None
+    kinds = [row[2] for row in mine]
+    lamp_kind = ("bad" if {"invalid", "revoked"} & set(kinds) else "valid" if kinds[0] == "passed"
+                 else LADDER_LAMP[kinds[0]])
+    text = "  ·  ".join(f"{title.split(' · ')[0]} {text}" for _key, title, _kind, text in mine)
+    return lamp_kind, text
 
 
 # -- evidence ---------------------------------------------------------------------
@@ -478,6 +670,11 @@ def launch_block(key: str, state: dict[str, Any], *, read_guide: bool) -> str | 
         return "Close the mirror before a new probe."
     if key == "replay" and not read_guide:
         return "Tick the box below the duration first."
+    if key == "live":
+        stage = state.get("live_stage", "hoist")
+        reasons = (state.get("live_lock") or {}).get(stage) or []
+        if reasons:
+            return f"Live arms {stage} is locked by the stage gate: {reasons[0]}"
     return None
 
 
@@ -507,14 +704,18 @@ def run_gui() -> int:  # pragma: no cover - exercised by hand and by the smoke t
 
     state: dict[str, Any] = {"session": None, "meta": {}, "step": None, "mirror": None,
                              "selected": "preflight", "alarm": False, "closing": False,
-                             "preflight": None, "replay": None, "maintenance": None}
+                             "preflight": None, "replay": None, "maintenance": None,
+                             "live_run": None, "live_stage": "hoist", "live_lock": {},
+                             "sender": None, "ladder": [], "ladder_window": None}
     results: queue.Queue[tuple[str, str, str]] = queue.Queue()  # maintenance results
     v = {name: tk.StringVar(value=value) for name, value in {
         "transport": "fake", "net": "", "robot_ip": ROBOT_IP, "domain": "0", "model": "",
         "attested": "", "firmware": "", "mode": "walking", "seconds": "10",
         "gap": f"{GAP_LEVELS[0]:g}", "level": "L1", "kp": f"{SAFE['kp']:g}",
         "kd": f"{SAFE['kd']:g}", "operator": "", "gains_attempt": "", "pkl": "",
-        "duration": "10", "answer": ""}.items()}
+        "duration": "10", "stage": "hoist", "answer": "", "live_stage": "hoist",
+        "time_limit": f"{live.TIME_LIMIT_S:g}", "port": str(live.DEFAULT_PORT),
+        "drill": "Following"}.items()}
     read_guide = tk.BooleanVar(value=False)
     v["pkl"].trace_add("write", lambda *_: read_guide.set(False))  # a new file needs a new tick
     state["firewall"] = firewall_state()
@@ -619,6 +820,21 @@ def run_gui() -> int:  # pragma: no cover - exercised by hand and by the smoke t
     prompt_buttons = ttk.Frame(prompt_frame)
     answer_entry = ttk.Entry(prompt_frame, textvariable=v["answer"], width=60, font=big)
 
+    # live status (step 13), shown above the log
+    live_label = tk.Label(root, font=("TkFixedFont", 11, "bold"), justify="left", anchor="w",
+                          fg="white", padx=8, pady=4)
+    live_bg = {"valid": "#1e7b34", "incomplete": "#b26a00", "info": "#1f5fa8", "none": "#555555",
+               "bad": "#b3261e"}
+
+    def show_live(event: dict[str, Any] | None) -> None:
+        if event is None:
+            live_label.pack_forget()
+            return
+        kind, text = live_status_text(event)
+        live_label.configure(text=text, bg=live_bg[kind])
+        if not live_label.winfo_ismapped():
+            live_label.pack(fill="x", padx=8, before=logs)
+
     # log
     logs = ttk.LabelFrame(root, text="Log (also saved in the session's gui-logs folder)")
     logs.pack(fill="both", expand=True, padx=8, pady=4)
@@ -661,6 +877,8 @@ def run_gui() -> int:  # pragma: no cover - exercised by hand and by the smoke t
     zip_button.pack(side="left", padx=12)
     ttk.Button(log_tools, text="Open the guide", command=lambda: subprocess.Popen(
         ["xdg-open", str(REPO_ROOT / "docs" / "k1-bringup-runbook.md")])).pack(side="left")
+    ttk.Button(log_tools, text="Stage ladder", command=lambda: show_ladder()).pack(side="left",
+                                                                                padx=12)
 
     def maintain(kind: str, work: Any) -> None:
         """Run ``work`` (firewall or zip) off the Tk thread; steps wait until it ends."""
@@ -711,6 +929,9 @@ def run_gui() -> int:  # pragma: no cover - exercised by hand and by the smoke t
                 messagebox.showerror("This session cannot be used", problem)
                 return
             state["session"], state["meta"] = Path(path).resolve(), session.meta
+        state["live_run"] = None  # the last live run belongs to the previous session
+        show_live(None)
+        reload_gate()
         refresh()
 
     def choose_session() -> None:
@@ -747,8 +968,13 @@ def run_gui() -> int:  # pragma: no cover - exercised by hand and by the smoke t
             rows = {}
         if state["preflight"]:
             rows["preflight"] = ("info", f"last run: {state['preflight']}")
-        if state["replay"]:
-            rows["replay"] = ("info", f"last run: {state['replay']}")
+        for key, kind, last in (("replay", "replay", state["replay"]),
+                                ("live", "live-arms", state["live_run"])):
+            found = ladder_lamp(state["ladder"], kind)
+            if found or last:
+                lamp_kind, text = found or ("info", "")
+                rows[key] = (lamp_kind, "  ·  ".join(t for t in (
+                    f"last run: {last}" if last else "", f"ledger: {text}" if text else "") if t))
         for key, *_rest in STEPS:
             kind, text = rows.get(key, ("none", "not run" if state["session"] else "no session"))
             tree.item(key, values=(text,), tags=(kind,))
@@ -778,9 +1004,105 @@ def run_gui() -> int:  # pragma: no cover - exercised by hand and by the smoke t
         why = can_run(state["selected"])
         run_button.configure(state="disabled" if why else "normal")
         why_label.configure(text=why or "")
+        sender = state["sender"]
+        if "sender" in live_widgets:
+            live_widgets["sender"].configure(
+                text="Stop practice sender" if sender is not None and sender.running
+                else "Start practice sender")
+        if "evaluate" in live_widgets:
+            live_widgets["evaluate"].configure(state="disabled" if why else "normal")
 
     def can_run(key: str) -> str | None:
         return launch_block(key, state, read_guide=read_guide.get())
+
+    live_widgets: dict[str, Any] = {}
+
+    def reload_gate() -> None:
+        """The ladder rows and the live locks of the open session's robot (after each run)."""
+        session, meta = state["session"], state["meta"]
+        state["ladder"], state["live_lock"] = [], {}
+        if session is not None:
+            try:
+                state["ladder"] = ladder_rows(session_ledger(meta), live.identity_of(meta))
+            except (OSError, StageGateError) as exc:
+                state["ladder"] = [("acceptance", "Ledger", "invalid", str(exc))]
+            if meta.get("transport") == "booster":
+                record = acceptance_record(session)
+                state["live_lock"] = {
+                    stage: live.lock_reasons(session, stage, record) if record is not None
+                    else ["no k1-acceptance.json in this session: run 11 · Record"]
+                    for stage in ("hoist", "standing")}
+        show_lock()
+        fill_ladder()
+
+    def show_lock() -> None:
+        label = live_widgets.get("lock")
+        if label is None or not label.winfo_exists():
+            return
+        stage = v["live_stage"].get()
+        if transport_now() != "booster":
+            label.configure(text="Practice robot: never locked; passes go to the PRACTICE "
+                            "ledger and unlock nothing.", foreground=colours["info"])
+            return
+        reasons = state["live_lock"].get(stage) or []
+        label.configure(text=(f"{stage}: allowed by the stage gate." if not reasons else
+                              f"{stage} is LOCKED by the stage gate:\n  " + "\n  ".join(reasons[:4])
+                              + (f"\n  ... and {len(reasons) - 4} more" if len(reasons) > 4 else "")),
+                        foreground=colours["valid" if not reasons else "bad"])
+
+    def on_live_stage(*_args: Any) -> None:
+        state["live_stage"] = v["live_stage"].get()
+        show_lock()
+        if "roles" in live_widgets and live_widgets["roles"].winfo_exists():
+            live_widgets["roles"].configure(text=f"Roles: {live.ROLES[state['live_stage']]}.")
+        refresh()
+
+    v["live_stage"].trace_add("write", on_live_stage)
+
+    def show_ladder() -> None:
+        window = state["ladder_window"]
+        if window is None or not window.winfo_exists():
+            window = tk.Toplevel(root)
+            window.title("K1 stage ladder")
+            window.geometry("980x300")
+            header = ttk.Label(window, font=big, wraplength=940, justify="left")
+            header.pack(anchor="w", padx=8, pady=6)
+            view = ttk.Treeview(window, columns=("status",), height=5, selectmode="none")
+            view.heading("#0", text="Stage")
+            view.heading("status", text="Status")
+            view.column("#0", width=260)
+            view.column("status", width=680)
+            for name, colour in colours.items():
+                view.tag_configure(name, foreground=colour)
+            view.pack(fill="both", expand=True, padx=8)
+            ttk.Label(window, foreground="#666666", wraplength=940, justify="left", text=(
+                "Each stage needs the one above it. A run's settings (gains, caps, model, stop "
+                "settings) are compared with its gate when it starts: step 13 shows the full "
+                "reasons. A stage is revoked by an unconfirmed release, a fall or a fault it "
+                "forbids.")).pack(anchor="w", padx=8, pady=6)
+            state["ladder_window"] = window
+            live_widgets["ladder"] = (header, view)
+        fill_ladder()
+        window.lift()
+
+    def fill_ladder() -> None:
+        window = state["ladder_window"]
+        if window is None or not window.winfo_exists():
+            return
+        header, view = live_widgets["ladder"]
+        meta = state["meta"]
+        if state["session"] is None:
+            header.configure(text="No session open: open or start one to see its robot's ladder.")
+        else:
+            ledger = session_ledger(meta)
+            header.configure(text=(
+                f"PRACTICE ledger {ledger.path}: practice passes unlock nothing on a real robot."
+                if ledger.practice else f"Robot {meta.get('serial')}: ledger {ledger.path}"))
+        view.delete(*view.get_children())
+        lamp_of = {"passed": "valid", "invalid": "bad", "revoked": "bad", "locked": "incomplete",
+                   "ready": "none", "practice": "info"}
+        for key, title, kind, text in state["ladder"]:
+            view.insert("", "end", iid=key, text=title, values=(text,), tags=(lamp_of[kind],))
 
     def select(_event: Any = None) -> None:
         chosen = tree.selection()
@@ -804,6 +1126,8 @@ def run_gui() -> int:  # pragma: no cover - exercised by hand and by the smoke t
     def build_options() -> None:
         for child in options.winfo_children():
             child.destroy()
+        for name in ("lock", "sender", "evaluate", "roles"):  # destroyed with the options
+            live_widgets.pop(name, None)
         key = state["selected"]
         _key, title, text, moves = next(s for s in STEPS if s[0] == key)
         panel.configure(text=title)
@@ -840,14 +1164,78 @@ def run_gui() -> int:  # pragma: no cover - exercised by hand and by the smoke t
                           "(a hint only: choose the qualified recording yourself)",
                           foreground="#666666", wraplength=520).pack(anchor="w")
             entry(f"Duration (s, max {REPLAY_MAX_S:g})", "duration")
+            entry("Stage (standing needs live arms on the hoist)", "stage",
+                  values=["hoist", "standing"])
             ttk.Checkbutton(options, variable=read_guide, text="I have read the guide's "
                             "unverified section and step 12; the recording is qualified.",
                             command=refresh).pack(anchor="w")
+        elif key == "live":
+            live_options()
         if key in MOTION:
             ttk.Label(options, text="Before you press Run: robot in the hoist, a second person "
                       "on the remote, nobody within reach, the robot in "
                       f"{v['mode'].get()} mode, the mirror open.", foreground="#b3261e",
                       wraplength=520).pack(anchor="w", pady=4)
+
+    def live_options() -> None:
+        entry("Stage (standing needs the gate)", "live_stage", values=["hoist", "standing"])
+        lock = ttk.Label(options, wraplength=520, justify="left")
+        lock.pack(anchor="w", pady=2)
+        live_widgets["lock"] = lock
+        entry(f"Time limit (s of following, max {live.MAX_TIME_LIMIT_S:g})", "time_limit")
+        entry("Stream port (UDP on this PC)", "port")
+        entry("Run", "drill", width=18, values=list(LIVE_DRILLS))
+        entry("Your name (operator, signs Evaluate)", "operator", width=30)
+        roles = ttk.Label(options, wraplength=520, justify="left",
+                          text=f"Roles: {live.ROLES[v['live_stage'].get()]}.")
+        roles.pack(anchor="w", pady=2)
+        live_widgets["roles"] = roles
+        practice = transport_now() != "booster"
+        ttk.Label(options, foreground="#666666", wraplength=520, justify="left", text=(
+            "Stream-loss drill: while the arms follow, stop the stream ("
+            + ("Stop practice sender" if practice else "stop the live tool in the console")
+            + "). STOP drill: while the arms follow, press STOP step. Evaluate stage judges this "
+            "session's attempts and writes the ledger entry.")).pack(anchor="w", pady=2)
+        row = ttk.Frame(options)
+        row.pack(anchor="w", pady=4)
+        evaluate = ttk.Button(row, text="Evaluate stage", command=lambda: launch(evaluate=True))
+        evaluate.pack(side="left")
+        live_widgets["evaluate"] = evaluate
+        if practice:
+            sender = ttk.Button(row, text="Start practice sender", command=toggle_sender)
+            sender.pack(side="left", padx=8)
+            live_widgets["sender"] = sender
+        ttk.Button(row, text="Stage ladder", command=show_ladder).pack(side="left", padx=8)
+        show_lock()
+
+    def toggle_sender() -> None:
+        sender = state["sender"]
+        if sender is not None and sender.running:
+            write("=== Practice sender: stopping (the stream ends).", "gui")
+            sender.stop()
+            state["sender"] = None
+            refresh()
+            return
+        if transport_now() == "booster" or state["session"] is None:
+            return
+        try:
+            port = int(bounded("port", v["port"].get(), 1024, 65535))
+        except ValueError as exc:
+            result_label.configure(text=f"Cannot start the sender: {exc}", fg=colours["bad"])
+            return
+        sender = PracticeSender(port, state["session"] / "gui-logs" /
+                                f"{dt.datetime.now():%Y%m%d-%H%M%S}-sender.log",
+                                sender_model(state["meta"]))
+        try:
+            sender.start()
+        except OSError as exc:
+            result_label.configure(text=f"Cannot start the sender: {exc}", fg=colours["bad"])
+            return
+        state["sender"] = sender
+        if state["step"] is not None and state["step"].step == "live":
+            state["step"].companions.append(sender)
+        write(f"=== Practice sender: streaming to 127.0.0.1:{port} (log {sender.log_path})", "gui")
+        refresh()
 
     def number(name: str, low: float, high: float) -> str:
         try:
@@ -858,7 +1246,7 @@ def run_gui() -> int:  # pragma: no cover - exercised by hand and by the smoke t
             raise ValueError(f"{name}: must be {low:g} to {high:g}")
         return f"{value:g}"
 
-    def command(key: str) -> tuple[str, list[str]]:
+    def command(key: str, evaluate: bool = False) -> tuple[str, list[str]]:
         session, meta = state["session"], state["meta"]
         model = ["--model", v["model"].get()] if v["model"].get().strip() else []
         attested = (["--attested-robot-id", v["attested"].get().strip()]
@@ -908,7 +1296,9 @@ def run_gui() -> int:  # pragma: no cover - exercised by hand and by the smoke t
             jsonl = session / "gui-logs" / f"replay-{dt.datetime.now():%Y%m%d-%H%M%S}.jsonl"
             args = [pkl, "--transport", meta["transport"], "--model", meta["model_path"],
                     "--duration", number("duration", 1, REPLAY_MAX_S), "--jsonl", str(jsonl),
-                    *attested]
+                    "--session", str(session), "--stage", v["stage"].get(), *attested]
+            if v["operator"].get().strip():
+                args += ["--operator", v["operator"].get().strip()]
             if meta["transport"] == "booster":
                 record = acceptance_record(session)
                 if record is None:
@@ -919,16 +1309,24 @@ def run_gui() -> int:  # pragma: no cover - exercised by hand and by the smoke t
                          str(meta.get("domain_id", 0)), "--acceptance-record", str(record),
                          "--yes-i-have-read-the-unverified-section"]
             return "replay", args
+        if key == "live":
+            record = acceptance_record(session) if meta["transport"] == "booster" else None
+            if record is not None and evidence(session, v["mode"].get())["record"][0] == "bad":
+                raise ValueError("the acceptance record is stale: run 11 · Record again")
+            return "live", live_command(
+                session, meta, stage=v["live_stage"].get(), time_limit=v["time_limit"].get(),
+                port=v["port"].get(), drill=v["drill"].get(), operator=v["operator"].get(),
+                evaluate=evaluate, attested=v["attested"].get(), record=record)
         raise ValueError(f"unknown step {key}")
 
-    def launch() -> None:
+    def launch(evaluate: bool = False) -> None:
         key = state["selected"]
         why = can_run(key)
         if why:
             result_label.configure(text=why, fg=colours["bad"])
             return
         try:
-            tool, args = command(key)
+            tool, args = command(key, evaluate)
         except ValueError as exc:
             result_label.configure(text=f"Cannot start: {exc}", fg=colours["bad"])
             return
@@ -943,11 +1341,15 @@ def run_gui() -> int:  # pragma: no cover - exercised by hand and by the smoke t
             result_label.configure(text=f"Cannot start: {exc}", fg=colours["bad"])
             return
         state["mirror" if key == "mirror" else "step"] = runner
+        if key == "live" and state["sender"] is not None:
+            runner.companions.append(state["sender"])  # stopped with the step
+        if key != "mirror":
+            show_live(None)
         result_label.configure(text=f"{TITLES[key]}: running...", fg=colours["info"])
         hint_label.pack_forget()
         refresh()
 
-    run_button.configure(command=launch)
+    run_button.configure(command=lambda: launch())
     def request_stop() -> None:
         if state["step"] is not None:
             write("=== Stop requested (Ctrl-C): the tool stops and releases the arms.", "gui")
@@ -1024,6 +1426,12 @@ def run_gui() -> int:  # pragma: no cover - exercised by hand and by the smoke t
             state["preflight"] = f"{outcome.verdict} {dt.datetime.now():%H:%M}"
         if key == "replay":
             state["replay"] = f"{outcome.verdict} {dt.datetime.now():%H:%M}"
+        if key == "live":
+            state["live_run"] = f"{outcome.verdict} {dt.datetime.now():%H:%M}"
+        if state["sender"] is not None and not state["sender"].running:
+            state["sender"] = None
+        if key != "mirror":
+            reload_gate()  # a run may have written a PASS or a revocation
         colour = colours["valid"] if outcome.verdict in ("PASS", "DONE") else colours["bad"]
         result_label.configure(text=f"{TITLES.get(key, key)}: {outcome.verdict}"
                                + (f" (attempt {runner.attempt['id']})" if runner.attempt else ""),
@@ -1034,6 +1442,8 @@ def run_gui() -> int:  # pragma: no cover - exercised by hand and by the smoke t
         if outcome.hint:
             hint_label.configure(text=f"What to check: {outcome.hint}")
             hint_label.pack(anchor="w", padx=6, pady=4, fill="x")
+        if outcome.alarm and runner.live is not None and runner.live.get("state") != "released":
+            show_live({**runner.live, "state": "unknown: the run ended abnormally"})  # red
         if outcome.alarm:
             state["alarm"] = True
             state["closing"] = False
@@ -1064,6 +1474,8 @@ def run_gui() -> int:  # pragma: no cover - exercised by hand and by the smoke t
             if runner is None:
                 continue
             for kind, item in runner.poll():
+                if kind == "event" and item.get("event") == "live":
+                    show_live(item)
                 if kind == "line":
                     write(("[mirror] " + item) if slot == "mirror" else item,
                           "mirror" if slot == "mirror" else "")
@@ -1071,7 +1483,14 @@ def run_gui() -> int:  # pragma: no cover - exercised by hand and by the smoke t
                 show_prompt(runner)
             if runner.finished:
                 finish(runner, slot)
+        sender = state["sender"]
+        if sender is not None and not sender.running:
+            state["sender"] = None
+            write("=== Practice sender stopped.", "gui")
+            refresh()
         if state["closing"] and not busy() and not state["alarm"]:
+            if state["sender"] is not None:
+                state["sender"].stop()
             root.destroy()
             return
         root.after(100, tick)

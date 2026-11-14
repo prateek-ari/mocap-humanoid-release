@@ -36,7 +36,7 @@ from abc import ABC, abstractmethod
 from collections import deque
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import json
 import math
 import os
@@ -47,6 +47,7 @@ from typing import Any, Literal, get_args
 
 import numpy as np
 
+from .k1_rpc_worker import DAMPING, MODE_QUERY, ROBOT_INFO, TAKEOVER, Deadline, RpcClosed, RpcWorker
 from .live_robots import K1_JOINTS, K1_UPPER_BODY_JOINTS
 from .safety import ArmSafetyEnvelope, SafetyCommand, SafetyConfig, SafetyError
 from .schema import JointLimit
@@ -88,11 +89,13 @@ class K1BridgeError(RuntimeError):
 
 
 class LocoError(RuntimeError):
-    """A loco RPC failed; ``timeout`` when the SDK reported code 100."""
+    """A loco RPC failed; ``timeout`` when the SDK reported code 100 or a deadline
+    passed; ``final`` when the action's time budget is spent (retrying is pointless)."""
 
-    def __init__(self, message: str, *, timeout: bool = False) -> None:
+    def __init__(self, message: str, *, timeout: bool = False, final: bool = False) -> None:
         super().__init__(message)
         self.timeout = timeout
+        self.final = final
 
 
 @dataclass(frozen=True)
@@ -253,8 +256,7 @@ class BoosterTransport(K1Transport):
         self._fall: Reading | None = None
         self.malformed_states = 0
         sdk.ChannelFactory.Instance().Init(int(domain_id), network_interface)
-        self._client = sdk.B1LocoClient()
-        self._client.Init()
+        self._start_loco(int(domain_id), network_interface)
         self._publisher = sdk.B1LowCmdPublisher()
         self._publisher.InitChannel()
         self._state_subscriber = sdk.B1LowStateSubscriber(self._on_low_state)
@@ -264,6 +266,10 @@ class BoosterTransport(K1Transport):
         self._stop = threading.Event()
         self._poller = threading.Thread(target=self._poll_mode, name="k1-mode", daemon=True)
         self._poller.start()
+
+    def _start_loco(self, domain_id: int, network_interface: str) -> None:
+        self._client = self._sdk.B1LocoClient()
+        self._client.Init()
 
     def _rpc(self, call: Callable[[], Any], what: str) -> Any:
         with self._rpc_lock:
@@ -339,6 +345,124 @@ class BoosterTransport(K1Transport):
         self._poller.join(timeout=2.0)
         for channel in (self._state_subscriber, self._fall_subscriber, self._publisher):
             channel.CloseChannel()
+
+
+@dataclass
+class ActionStatus:
+    """When an RPC action was issued and when the robot confirmed it:
+    separate states in the log and the window)."""
+
+    requested_at: float | None = None
+    confirmed_at: float | None = None
+    #: The latest failed attempt; a later confirmation still wins.
+    failure: str | None = None
+
+    @property
+    def state(self) -> str:
+        if self.confirmed_at is not None:
+            return "confirmed"
+        if self.failure is not None:
+            return "failed"
+        return "none" if self.requested_at is None else "requested"
+
+
+class IsolatedBoosterTransport(BoosterTransport):
+    """Pub/sub (low state, fall, low cmd) in this process; every loco RPC in an
+    isolated child process with a deadline (:mod:`mocap_g1.k1_rpc_worker`).  Same :class:`K1Transport` interface, so :class:`K1ArmBridge` is
+    unchanged; :class:`BoosterTransport` stays for the commissioning tool.
+
+    Mode polling never blocks a control tick: it runs on its own thread and a
+    missed query (0.3 s) leaves the reading to age into the bridge's
+    ``mode_unknown`` fault.  A release is one episode of ``RELEASE.total_s``
+    from its first request after a takeover: the bridge's retries share that
+    budget; a failure once it is spent is ``final``, so the bridge stops retrying
+    and latches ``release_unconfirmed`` (by the budget plus at most one 0.2 s
+    retry pause that began inside it).
+    """
+
+    RELEASE = Deadline(0.9, 2.0)
+
+    def _start_loco(self, domain_id: int, network_interface: str) -> None:
+        self.rpc = RpcWorker(domain_id=domain_id, network_interface=network_interface,
+                             clock=self._clock)
+        self._release_end: float | None = None
+        self.actions = {"release": ActionStatus(), "damping": ActionStatus()}
+        #: (time, text) of every issued, confirmed and failed action, for the log.
+        self.events: deque[tuple[float, str]] = deque(maxlen=256)
+
+    def _loco(self, name: str, args: tuple[Any, ...], deadline: Deadline, *,
+              preempt: bool = False) -> Any:
+        try:
+            result = self.rpc.call(name, args, deadline=deadline, preempt=preempt)
+        except RpcClosed as exc:
+            raise LocoError(f"{name} failed: {exc}") from exc
+        if not result.ok:
+            raise LocoError(f"{name} failed: {result.error}", timeout=result.timeout)
+        return result.value
+
+    def _poll_mode(self) -> None:
+        while True:  # the first reading at once, then every MODE_POLL_S
+            try:
+                mode = int(self._loco("GetMode", (), MODE_QUERY))
+            except (LocoError, TypeError, ValueError):
+                pass  # the reading goes stale and the bridge stops
+            else:
+                with self._lock:
+                    self._mode = Reading(mode, self._clock())
+            if self._stop.wait(self.MODE_POLL_S):
+                return
+
+    def _event(self, text: str) -> float:
+        now = self._clock()
+        self.events.append((now, text))
+        return now
+
+    def upper_body_control(self, enable: bool) -> None:
+        if enable:
+            self._release_end = None
+            self._loco("UpperBodyCustomControl", (True,), TAKEOVER)
+            return
+        if self._release_end is None:
+            now = self._event("release requested")
+            self._release_end = now + self.RELEASE.total_s
+            self.actions["release"] = ActionStatus(requested_at=now)
+        status = self.actions["release"]
+        remaining = self._release_end - self._clock()
+        try:
+            if remaining <= 0:
+                raise LocoError("release deadline spent", timeout=True, final=True)
+            self._loco("UpperBodyCustomControl", (False,),
+                       Deadline(min(self.RELEASE.attempt_s, remaining), remaining), preempt=True)
+        except LocoError as exc:
+            if self._clock() >= self._release_end:
+                exc.final = True
+            status.failure = str(exc)
+            self._event(f"release attempt failed: {exc}")
+            raise
+        status.confirmed_at = self._event("release confirmed (RPC returned OK)")
+        self._release_end = None
+
+    def damping(self) -> None:
+        """``ChangeMode(kDamping)`` within ``DAMPING``; confirmed = the RPC returned OK."""
+        status = self.actions["damping"] = ActionStatus(requested_at=self._event("damping requested"))
+        try:
+            self._loco("ChangeMode", ("damping",), DAMPING, preempt=True)
+        except LocoError as exc:
+            status.failure = str(exc)
+            self._event(f"damping failed: {exc}")
+            raise
+        status.confirmed_at = self._event("damping confirmed (RPC returned OK)")
+
+    def action_status(self, name: str) -> ActionStatus:
+        """A copy of ``"release"`` or ``"damping"`` status."""
+        return replace(self.actions[name])
+
+    def robot_info(self) -> dict[str, str]:
+        return dict(self._loco("GetRobotInfo", (), ROBOT_INFO))
+
+    def close(self) -> None:
+        super().close()
+        self.rpc.close()
 
 
 def binding_version() -> str | None:
@@ -582,7 +706,9 @@ class K1ArmBridge:
         for attempt in range(self.config.release_attempts):
             try:
                 self.transport.upper_body_control(False)
-            except LocoError:
+            except LocoError as exc:
+                if exc.final:
+                    break
                 if attempt + 1 < self.config.release_attempts:
                     self.sleeper(0.2)
                 continue
@@ -727,8 +853,6 @@ class AcceptanceRecord:
 
     def bridge_config(self, config: K1BridgeConfig) -> K1BridgeConfig:
         """``config`` with the recorded takeover mode and fall-topic freshness."""
-        from dataclasses import replace
-
         return replace(config, allowed_modes=frozenset({ROBOT_MODES[self.data["takeover_mode"]]}),
                        fall_timeout_s=3.0 * float(self.data["fall_topic"]["period_s"]))
 

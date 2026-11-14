@@ -72,6 +72,7 @@ from mocap_g1.live_robots import (  # noqa: E402
     robot_envelope_limits,
 )
 from mocap_g1.safety import ArmSafetyEnvelope, SafetyConfig  # noqa: E402
+from mocap_g1.stage_gate import Ledger, commissioning_root  # noqa: E402
 from tools.control.g1_arm_bridge import iter_dds_replay_ticks, sigint_gate  # noqa: E402
 from tools.control.k1_arm_bridge import (  # noqa: E402
     MANUAL_STOP,
@@ -86,7 +87,6 @@ ROBOT = LIVE_ROBOTS["booster_k1"]
 LIMITS = {name: limit for name, limit in robot_envelope_limits(ROBOT).items() if name in ARMS}
 MARGIN = SafetyConfig().position_margin_rad
 CONTACT_TOLERANCE_M = SafetyConfig().contact_tolerance_m
-DEFAULT_ROOT = Path("k1-commissioning")
 ROBOT_IP = "192.168.10.102"  # Booster's documented default; --robot-ip if the robot differs
 EXPECTED_SDK = "1.6.3"  # the pyproject.toml "booster" extra
 CONTROL_DT = 0.02
@@ -1443,16 +1443,35 @@ def run_record(args: argparse.Namespace) -> int:
     out = args.out or session.path / ("k1-acceptance-PRACTICE.json" if practice else "k1-acceptance.json")
     atomic_write(Path(out), record)
     print(f"Acceptance record: {out}")
+    register_acceptance(record, Path(out), files)
     if not practice:
         approved = record["approved"]
         print("First real replay (hoist, short, slow, qualified recording):\n"
               f"  python3 tools/control/k1_arm_bridge.py <motion.pkl> --transport booster "
-              f"--net {meta.get('net')} --acceptance-record {out} --model {meta.get('model_path')} "
+              f"--net {meta.get('net')} --session {session.path} --stage hoist "
+              f"--acceptance-record {out} --model {meta.get('model_path')} "
               + (f"--attested-robot-id {meta['serial']} " if meta["identity_source"] == "attested"
                  else "") +
               f"--kp {approved['kp']:g} --kd {approved['kd']:g} --duration 10 "
               "--yes-i-have-read-the-unverified-section --jsonl first-replay.jsonl")
     return 0
+
+
+def register_acceptance(record: Mapping[str, Any], out: Path, files: Mapping[str, Path]) -> None:
+    """S0 in the stage ledger: the record and every attempt it cites are its evidence."""
+    practice = bool(record["practice"])
+    serial = str(record["robot_identity"]["serial_number"])
+    ledger = Ledger(commissioning_root(), serial, practice=practice)
+    approved = record["approved"]
+    ledger.record_pass(
+        "acceptance",
+        identity={"serial": serial, "firmware": record["firmware"],
+                  "sdk_binding_version": record["sdk_binding_version"]},
+        settings={key: approved[key] for key in ("kp", "kd", "speed_max_rad_s", "accel_max_rad_s2")},
+        evidence={"acceptance-record": out, **{f"attempt:{key}": path for key, path in files.items()}},
+        operator=str(record["operator"]), extra={"takeover_mode": record["takeover_mode"]})
+    print(f"Stage ledger: {ledger.path} (acceptance PASS"
+          + (", PRACTICE: unlocks nothing)" if practice else ")"))
 
 
 # -- command line ---------------------------------------------------------------
@@ -1485,7 +1504,9 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_argument("--net", default="")
     sub.add_argument("--domain-id", type=int, default=0, help="DDS domain (Booster default 0)")
     sub.add_argument("--session", type=Path, help="probe again in this session")
-    sub.add_argument("--root", type=Path, default=DEFAULT_ROOT, help="where sessions are made")
+    sub.add_argument("--root", type=Path, default=commissioning_root(),
+                     help="where sessions are made (default $K1_COMMISSIONING_ROOT, else "
+                     "<repo>/k1-commissioning)")
     sub.add_argument("--seconds", type=float)
     sub.add_argument("--attested-robot-id")
     sub.add_argument("--firmware", help="with --attested-robot-id: the firmware Booster's app shows")
