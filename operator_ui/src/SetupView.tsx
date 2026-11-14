@@ -47,7 +47,7 @@ interface StepMeta {
 
 const STEP_META: Record<SetupStep, StepMeta> = {
   session: { guide: '03', title: 'Session', route: null, kinds: ['doctor'], instruction: 'Fill in the values for this take, then click Save session.' },
-  windows: { guide: '04–05', title: 'Windows: suit and streaming', route: 'live', kinds: [], instruction: 'On the Windows PC, set up Xsens with these values. Nothing to click here.' },
+  windows: { guide: '04–05', title: 'Windows: suit and streaming', route: 'live', kinds: [], instruction: 'On the Windows PC, set up Xsens with these values. Here, click only Allow in firewall if it is shown.' },
   stream: { guide: '06', title: 'Check the stream', route: 'live', kinds: ['acceptance'], instruction: 'Start streaming in Xsens, then click Run {n}-second check.' },
   live: { guide: '07', title: 'Live simulation', route: 'live', kinds: ['live', 'compare'], instruction: 'Click Start live simulation, then start streaming in Xsens within 60 seconds.' },
   bvh: { guide: '08', title: 'BVH files', route: 'recorded', kinds: ['bvh_check'], instruction: 'Copy both BVH files to the paths below, then click Check files.' },
