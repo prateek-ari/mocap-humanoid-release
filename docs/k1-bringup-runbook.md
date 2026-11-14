@@ -85,7 +85,10 @@ send to the developers" below).
 
 ## Before the robot arrives
 
-1. **Install** this checkout with the Booster SDK bindings and the GMR runtime (for the K1 model):
+1. **Install** this checkout with the Booster SDK bindings and the GMR runtime (for the K1 model).
+   Easiest: say yes when `install-ubuntu.sh` asks about the K1 test tools, or click **Install K1
+   test tools** in the Setup console, step **13 · Real K1** (it shows each part as FOUND or
+   MISSING; **Install Tk** asks for your password if Tk is missing). From a terminal:
    `bash tools/setup/install.sh recorded --with-booster`
    This installs `booster_robotics_sdk_python==1.6.3`. The K1 model is then
    `~/mocap-runtime/GMR/assets/booster_k1/K1_serial.xml`; pass it with `--model` to `preflight`
@@ -110,12 +113,19 @@ In the commands below, `T=".venv/bin/python tools/control/k1_commission.py"` and
 
 ## The test window
 
+Open **K1 Hardware Tests** from the applications menu, or click **Open K1 test window** in the
+Setup console (step 13). From a terminal:
+
 ```bash
 .venv/bin/python tools/control/k1_commission_gui.py
 ```
 
-A window with the twelve steps as buttons. It needs a screen and Tk (`sudo apt install
-python3-tk`; `install.sh --with-booster --system-packages` installs it). It does not move the
+A window with the twelve steps as buttons. It needs a screen and Tk (**Install Tk** in step 13,
+or `sudo apt install python3-tk`; `install.sh --with-booster --system-packages` installs it).
+Only one test window opens at a time: a second launch (menu, console or terminal) says "already
+open, or an install is running" and exits. The installer refuses to run while the window is open
+("Close the K1 test window first"), because it changes the Python environment the window runs on.
+Shutting down the Setup console does not close the window or stop a running step. It does not move the
 robot by itself: each step runs the same `k1_commission.py` command as this guide (step 12 runs
 `k1_arm_bridge.py`), with the same checks, limits and evidence.
 

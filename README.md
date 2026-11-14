@@ -63,19 +63,23 @@ Already downloaded the project? Run `bash install-ubuntu.sh` from its folder. To
 
 The script checks the PC and installs only what is missing: the NVIDIA driver, Docker, the NVIDIA Container Toolkit and the project itself. If it installs the NVIDIA driver, it asks you to restart: run the same command again after the restart. Run it from a terminal on the PC's desktop, not over SSH. `bash install-ubuntu.sh --check` only reports what is missing.
 
+At the end it asks once: **Also install the recorded route and the Booster K1 test tools?** Press Enter for yes. This adds the runtime for recorded takes (in `~/mocap-runtime`), the Booster SDK and Tk. You can also say no and install them later with a button in the Setup console (step 13).
+
 ### Use it
 
-When the installer finishes, it opens the **Setup console** in your browser. After that, open it any time from your applications menu: **Mocap Setup**.
+When the installer finishes, it opens the **Setup console** in your browser. After that, open it any time from your applications menu: **Mocap Setup**. To stop it, click **Shut down the console** in step 11, or right-click **Mocap Setup** in the menu or dock and choose **Stop the Setup console**.
 
-The Setup console walks you through every step with buttons: enter the session details, check the suit's stream, start the live simulation, or turn a recording into a video.
+The Setup console walks you through every step with buttons: enter the session details, allow the stream through the firewall, check the suit's stream, start the live simulation, or turn a recording into a video. When a step needs administrator rights (the firewall rule, installing Tk), the button asks for your password in a normal Ubuntu password window. If no password window appears, use the **Copy** button next to the command and run it in a terminal.
 
-**G1 and T1 side by side:** to drive both robots from one suit in one window, load your saved session and run `bash docker/gmr-live/run-compare.sh --calibrate-after 5` from the project folder. Step 07 of the setup guide has the exact commands.
+**G1 and T1 side by side:** to drive both robots from one suit in one window, click **Start G1 + T1 side by side** in step 07. Stop it with **Stop**.
 
 ## Testing on the real Booster K1
 
 When a Booster K1 is on site, test it step by step before it replays any motion. The script `tools/control/k1_commission.py` takes the robot through twelve small steps on a hoist: PC check, read-only probe and 3D mirror, zero check, takeover and release, hold, balance, command loss, joint signs, gains, and the acceptance record. Each step shows its plan before the robot moves, stops and releases the arms when a check fails, and saves its evidence. The acceptance record unlocks the K1 arm replay (`tools/control/k1_arm_bridge.py`). Every step can be practised first on a fake robot.
 
-You need an Ubuntu PC wired to the robot (the Windows app cannot drive it), a hoist and two people. Install with `bash tools/setup/install.sh recorded --with-booster`, then follow the **[K1 hardware test guide](docs/k1-bringup-runbook.md)** word for word. The easiest way is the test window, `.venv/bin/python tools/control/k1_commission_gui.py`: the same steps as buttons, with a live log and a red alarm if a release is not confirmed. Nothing in this code has run on a real K1 yet.
+You need an Ubuntu PC wired to the robot (the Windows app cannot drive it), a hoist and two people. Install the K1 test tools when the Ubuntu installer asks, or later with **Install K1 test tools** in step 13 · **Real K1** of the Setup console. Then follow the **[K1 hardware test guide](docs/k1-bringup-runbook.md)** word for word. Use the test window: open **K1 Hardware Tests** from the applications menu, or click **Open K1 test window** in step 13. It has the same steps as buttons, with a live log and a red alarm if a release is not confirmed. Only one test window opens at a time, and it does not open while an install runs. Nothing in this code has run on a real K1 yet.
+
+From a terminal, the same things still work: `bash tools/setup/install.sh recorded --with-booster` installs the tools, and `.venv/bin/python tools/control/k1_commission_gui.py` opens the window.
 
 ## Guides
 

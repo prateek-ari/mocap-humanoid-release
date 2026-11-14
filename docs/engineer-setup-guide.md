@@ -55,11 +55,11 @@ The installer asks short questions. Press **Enter** to accept each default:
 
 It installs everything, runs the project checks and ends with `PASS`. Image builds and the recorded runtime download can take a while; let them finish. If a step fails, fix the printed cause and run the same command again: finished parts are reused.
 
-The installer also adds **Mocap Setup** to your applications menu. From now on, open the Setup console from there: it starts the console if needed and opens `http://127.0.0.1:8784/` in your browser. Open it from the desktop of this PC, not over SSH, so the simulation windows can appear.
+The installer also adds **Mocap Setup** to your applications menu. From now on, open the Setup console from there: it starts the console if needed and opens `http://127.0.0.1:8784/` in your browser. Open it from the desktop of this PC, not over SSH, so the simulation windows can appear. Right-click **Mocap Setup** (in the menu or the dock) for **Stop the Setup console**. When the K1 test tools are installed, the menu also has **K1 Hardware Tests** (step 13).
 
 ### Docker and NVIDIA (live route)
 
-**Easiest:** run `bash install-ubuntu.sh` from the project folder instead of the commands above. It checks the NVIDIA driver, Docker, the NVIDIA Container Toolkit and the project, and installs only what is missing (restart and run it again if it installs the driver). `bash install-ubuntu.sh --check` only reports.
+**Easiest:** run `bash install-ubuntu.sh` from the project folder instead of the commands above. It checks the NVIDIA driver, Docker, the NVIDIA Container Toolkit and the project, and installs only what is missing (restart and run it again if it installs the driver). At the end it asks once, **Also install the recorded route and the Booster K1 test tools?** (Enter = yes): that is the recorded runtime in `~/mocap-runtime`, the Booster SDK and Tk. Say no to skip them; step 13 of the console installs them later with a button. `bash install-ubuntu.sh --check` only reports; it lists the K1 items as `[optional]`.
 
 To install them by hand instead, do this before choosing **1 · Live**, using the official instructions:
 
@@ -132,13 +132,15 @@ On **Windows**, in Xsens Humanoid open **Options → Network Streamer** (labels 
 
 > SCREENSHOT: W04 · Network Streamer settings. Show Linux destination, UDP 5555, body quaternion and joint-angle streams, and props/fingers disabled.
 
-**Linux firewall** (only if UFW is active): the console shows the exact command under **Linux firewall**. Click its **Copy** button, paste it into a terminal and enter your password. It looks like this:
+**Linux firewall:** under **Linux firewall** the console says whether UFW is active on this PC. When it is active (or the console cannot tell), click **Allow in firewall**. Ubuntu shows its password window; enter your password. The console then shows **Firewall rule added**, or **Cancelled** if you closed the window. When UFW is off, nothing is needed.
+
+If no password window appears (for example, the console was started over SSH), the console says so. Then click **Copy** next to the command, paste it into a terminal on this PC and enter your password. It looks like this:
 
 ```bash host
 sudo ufw allow from 192.168.1.246 to 192.168.1.20 port 5555 proto udp
 ```
 
-The console cannot run this for you because it needs administrator rights. If both routers use the same subnet, see [overlapping networks](engineer-reference.md#overlapping-wi-fi-and-xsens-subnets).
+If both routers use the same subnet, see [overlapping networks](engineer-reference.md#overlapping-wi-fi-and-xsens-subnets).
 
 **Done when:** Xsens is streaming to the destination shown in the console on port 5555.
 
@@ -167,18 +169,19 @@ Open **07 Live simulation**. It shows the robot and height from your session.
 ![Step 07: the live simulation running with auto-calibration; MuJoCo window keys below](engineer-guide-assets/setup-07-live.png)
 
 To show **G1 and T1 side by side in one window**, stop the single-robot viewer
-first, then run these commands from the repository root:
+first, then click **Start G1 + T1 side by side**. It uses the same
+**Auto-calibrate after** value (5 s when not ticked). Keep Windows streaming
+and stand still with arms down for the first seconds. Both robots use the same
+received frame and calibrate automatically. Click **Stop** when you are done.
+See [what changed and why](live-xsens-commissioning-2026-10-14.md)
+and the [offline block diagram](live-xsens-g1-t1-diagram.html).
+
+From a terminal, the same comparison is:
 
 ```bash
 source session.env
 bash docker/gmr-live/run-compare.sh --calibrate-after 5
 ```
-
-Keep Windows streaming and stand still with arms down for the first five
-seconds. Both robots use the same received frame and calibrate automatically.
-The comparison currently starts from the terminal, rather than the Setup
-console's single-robot button. See [what changed and why](live-xsens-commissioning-2026-10-14.md)
-and the [offline block diagram](live-xsens-g1-t1-diagram.html).
 
 Keys in the MuJoCo window (click it first):
 
@@ -246,7 +249,7 @@ Open **10 Watch and record** and choose **Preview** or **Arm-aligned**.
 
 ![Step 11: report saved; all session files listed](engineer-guide-assets/setup-11-finish.png)
 
-For the next take, go back to step 03 and click **New session**. Closing the browser tab leaves the console running in the background, ready for the menu entry; to stop it, run `bash tools/setup/open_console.sh --stop` in the project folder.
+For the next take, go back to step 03 and click **New session**. Closing the browser tab leaves the console running in the background, ready for the menu entry. To stop it, click **Shut down the console** at the bottom of **11 Finish** and confirm: a running job stops first, then the console exits. An open K1 test window stays open. **Mocap Setup** in the menu starts it again. (Also possible: right-click **Mocap Setup** → **Stop the Setup console**, or `bash tools/setup/open_console.sh --stop`.)
 
 Nothing here approves physical robot use. Connecting a real robot is optional and later. The Booster K1 needs the [K1 hardware test guide](k1-bringup-runbook.md) (step 13): its arm bridge stays locked until the hoisted day-one tests are written into an acceptance record. The live viewer's `--g1-hardware-envelope` previews the speed-limited commands a real G1 would receive.
 
@@ -265,7 +268,10 @@ Nothing here approves physical robot use. Connecting a real robot is optional an
 | No UDP traffic | Is Xsens streaming? Check the destination IP and port 5555, the Ethernet cable and the firewall command (step 05). |
 | Only `MXTP12`/`MXTP13` | Turn on the quaternion and joint-angle streams and start preview or playback. |
 | `unexpected source` | The Windows IP changed. Update it in step 03 and click **Save session**. |
-| `Recorded runtime not found` | Run the installer again and choose **2 · Recorded**. |
+| `Recorded runtime not found` | Click **Install it in step 13 · Real K1**, then **Install K1 test tools** (it installs the recorded runtime too). Or run the installer again and choose **2 · Recorded**. |
+| **Allow in firewall** says it could not ask for your password | No password window could open (no desktop session, or polkit refused). Click **Copy** and run the command in a terminal. |
+| K1 test window: `already open, or an install is running` | Look for the open K1 window on this desktop, or wait for the install to finish. Only one K1 window opens at a time. |
+| Install K1 test tools: `Close the K1 test window first` | The installer changes the Python environment the K1 window runs on. Close the window, then click Install again. |
 | Docker `permission denied` | Your user is not in the docker group yet. Add it, then log out and in. |
 | Docker cannot use the GPU | Register the NVIDIA runtime (step 02, live route). |
 | Robot too small or too big | Check the BVH units and the measured height in step 03. |
@@ -283,8 +289,8 @@ This step is for the day the Booster K1 is on site. It moves a real robot, so fo
 1. **People and equipment:** the robot hangs in a hoist; a second person holds the Booster remote (LT+BACK = damping) during every motion; a protractor.
 2. **PC:** an Ubuntu 22.04 or 24.04 PC wired to the robot, address `192.168.10.10/24`. The Windows app cannot drive the robot (the Booster SDK is Linux-only).
 3. **Robot facts first:** check the robot's IP address (Booster default `192.168.10.102`), firmware (the SDK expects 1.8.0), DDS domain, serial number and the remote's emergency stop against Booster's manual. The guide's table "What to find out about the robot first" lists each one.
-4. **Install:** `bash tools/setup/install.sh recorded --with-booster`.
-5. **Practise first:** open the test window, `.venv/bin/python tools/control/k1_commission_gui.py`, keep transport `fake`, choose the K1 model (`~/mocap-runtime/GMR/assets/booster_k1/K1_serial.xml`) and click through the steps from **1 · Preflight**. Without a screen, use the script: `.venv/bin/python tools/control/k1_commission.py probe --model <K1_serial.xml>`, then follow the **Next:** line each step prints.
+4. **Install:** in the Setup console open **13 Real K1**. It shows the Booster SDK, Tk, the GMR runtime and the K1 model as FOUND or MISSING. Click **Install K1 test tools** (no password needed; safe to run again; it fails with a clear message while a K1 window is open). If Tk is MISSING, click **Install Tk** and enter your password. (Terminal: `bash tools/setup/install.sh recorded --with-booster`.)
+5. **Practise first:** click **Open K1 test window** in step 13, or open **K1 Hardware Tests** from the applications menu (terminal: `.venv/bin/python tools/control/k1_commission_gui.py`). Only one window opens at a time; shutting down the Setup console leaves it open. Keep transport `fake`, choose the K1 model (`~/mocap-runtime/GMR/assets/booster_k1/K1_serial.xml`) and click through the steps from **1 · Preflight**. Without a screen, use the script: `.venv/bin/python tools/control/k1_commission.py probe --model <K1_serial.xml>`, then follow the **Next:** line each step prints.
 6. **On the robot:** the same steps with transport `booster` and `--net 192.168.10.10` (in the window: **Transport** and **PC interface or IP**): probe, mirror, zero-check, quick-release, hold, balance, command-loss, signs, gains, record. Each step shows its plan and waits for `yes` before the robot moves, and stops and releases the arms when a check fails.
 7. **Status:** `.venv/bin/python tools/control/k1_commission.py status --session <folder>` shows which steps passed and what to run next.
 
