@@ -5,7 +5,7 @@ set -Eeuo pipefail
 
 usage() {
   cat <<'EOF'
-Usage: bash install-ubuntu.sh [--check] [--with-ros2] [--no-console]
+Usage: bash install-ubuntu.sh [--check] [--with-ros2] [--with-k1 | --no-k1] [--no-console]
 
 Checks this Ubuntu 22.04/24.04 PC and installs only what is missing:
   1. Helper packages (curl, gnupg, pciutils, ubuntu-drivers-common)
@@ -13,10 +13,15 @@ Checks this Ubuntu 22.04/24.04 PC and installs only what is missing:
   3. Docker Engine, and Docker access for your user
   4. NVIDIA Container Toolkit, registered with Docker
   5. This project: tools/setup/install.sh live (Python environment, live image)
-Then it adds "Mocap Setup" to the applications menu and opens it.
+  6. Optional (it asks; default yes): the recorded route and the Booster K1 test
+     tools (GMR runtime in ~/mocap-runtime, Booster SDK, Tk)
+Then it adds "Mocap Setup" (and "K1 Hardware Tests") to the applications menu
+and opens the Setup console.
 
   --check       Only report what is installed or missing; change nothing
   --with-ros2   Also build the optional ROS 2 image
+  --with-k1     Install step 6 without asking
+  --no-k1       Skip step 6 without asking
   --no-console  Do not open the Setup console at the end
   -h, --help    Show this help
 
@@ -27,11 +32,13 @@ EOF
 
 repo_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 user=${USER:-$(id -un)}
-check_only=0 with_ros2=0 open_console=1
+check_only=0 with_ros2=0 open_console=1 with_k1=ask
 while (($#)); do
   case $1 in
     --check) check_only=1 ;;
     --with-ros2) with_ros2=1 ;;
+    --with-k1) with_k1=yes ;;
+    --no-k1) with_k1=no ;;
     --no-console) open_console=0 ;;
     -h|--help) usage; exit 0 ;;
     *) usage >&2; printf 'ERROR: unknown option: %s\n' "$1" >&2; exit 2 ;;
@@ -48,6 +55,7 @@ ok() { printf '  [ok]       %s\n' "$*"; }
 missing_count=0
 missing() { printf '  [missing]  %s\n' "$*"; missing_count=$((missing_count + 1)); }
 doing() { printf '  [install]  %s\n' "$*"; }
+optional() { printf '  [optional] %s\n' "$*"; }
 
 ask_yes() {
   local reply
@@ -142,6 +150,23 @@ check_report() {
     missing 'Live simulation image (gmr-live)'
   fi
   if [[ -n ${DISPLAY:-} ]]; then ok "Desktop display: $DISPLAY"; else missing 'Desktop display (run from a terminal on the PC desktop, not SSH)'; fi
+  # Step 6 is optional: report it, but do not count it as missing.
+  local runtime=$HOME/mocap-runtime venv_python=$repo_root/.venv/bin/python
+  if [[ -x $runtime/venv/bin/python && -f $runtime/GMR/assets/booster_k1/K1_serial.xml ]]; then
+    ok "Recorded route runtime with the K1 model ($runtime)"
+  else
+    optional "Recorded route runtime with the K1 model ($runtime)"
+  fi
+  if [[ -x $venv_python ]] && "$venv_python" -c 'import booster_robotics_sdk_python' >/dev/null 2>&1; then
+    ok 'Booster K1 SDK (K1 test window)'
+  else
+    optional 'Booster K1 SDK (K1 test window)'
+  fi
+  if [[ -x $venv_python ]] && "$venv_python" -c 'import tkinter' >/dev/null 2>&1; then
+    ok 'Tk (K1 test window)'
+  else
+    optional 'Tk (K1 test window)'
+  fi
 }
 
 if (( check_only )); then
@@ -168,14 +193,14 @@ apt_install() {
   sudo apt-get install -y "$@"
 }
 
-step '1/5 Helper packages'
+step '1/6 Helper packages'
 helpers=(ca-certificates curl gnupg pciutils ubuntu-drivers-common)
 need=()
 for package in "${helpers[@]}"; do pkg_installed "$package" || need+=("$package"); done
 if ((${#need[@]})); then doing "${need[*]}"; apt_install "${need[@]}"; fi
 ok 'helper packages'
 
-step '2/5 NVIDIA driver'
+step '2/6 NVIDIA driver'
 offer_restart() {
   printf '\nRestart the PC, then run this script again:  bash install-ubuntu.sh\n'
   if ask_yes 'Restart now?'; then sudo reboot; fi
@@ -196,7 +221,7 @@ else
   offer_restart
 fi
 
-step '3/5 Docker'
+step '3/6 Docker'
 if docker_from_snap; then
   die 'Docker is installed as a Snap, which this setup does not support. Remove it with: sudo snap remove docker, then run this script again.'
 fi
@@ -220,7 +245,7 @@ if ! user_in_docker_group; then
 fi
 ok "Docker access for $user"
 
-step '4/5 NVIDIA Container Toolkit'
+step '4/6 NVIDIA Container Toolkit'
 if ! toolkit_installed; then
   doing 'NVIDIA Container Toolkit (from nvidia.github.io)'
   curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey |
@@ -239,12 +264,23 @@ fi
 nvidia_runtime_registered || die 'Docker does not list the nvidia runtime after configuration'
 ok 'NVIDIA runtime registered with Docker'
 
-step '5/5 Project (Python environment and live simulation image)'
+step '5/6 Project (Python environment and live simulation image)'
 [[ -n ${DISPLAY:-} ]] ||
   die 'no desktop display. Steps 1-4 are done: open a terminal on the PC desktop (not SSH) and run this script again.'
 install_args=(live --system-packages)
 (( ! with_ros2 )) || install_args+=(--with-ros2)
 with_docker_group bash "$repo_root/tools/setup/install.sh" "${install_args[@]}"
+
+step '6/6 Recorded route and K1 test tools (optional)'
+if [[ $with_k1 == ask ]]; then
+  if ask_yes 'Also install the recorded route and the Booster K1 test tools?'; then with_k1=yes; else with_k1=no; fi
+fi
+if [[ $with_k1 == yes ]]; then
+  bash "$repo_root/tools/setup/install.sh" recorded --with-booster --system-packages \
+    --workspace "$HOME/mocap-runtime" --robot booster_k1
+else
+  printf '  Skipped. Install them later from the Setup console (step 13 · Real K1).\n'
+fi
 bash "$repo_root/tools/setup/open_console.sh" --install-shortcut ||
   printf 'Could not add the menu shortcut; open the console with: bash tools/setup/open_console.sh\n'
 

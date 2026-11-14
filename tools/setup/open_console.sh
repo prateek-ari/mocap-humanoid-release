@@ -7,7 +7,9 @@ usage() {
 Usage: bash tools/setup/open_console.sh [--install-shortcut | --stop] [--no-browser]
 
   (no option)         Start the Setup console if it is not running, then open it
-  --install-shortcut  Add a "Mocap Setup" launcher to the applications menu
+  --install-shortcut  Add a "Mocap Setup" launcher to the applications menu (right-click
+                      it for "Stop the Setup console"), and "K1 Hardware Tests" when the
+                      K1 test tools are installed
   --stop              Stop a Setup console started by this script
   --no-browser        Start it without opening a browser
 
@@ -98,25 +100,51 @@ case $action in
     mkdir -p -- "$applications"
     entry=$applications/mocap-setup.desktop
     # Desktop Entry quoting: escape \ " ` $ inside a double-quoted argument.
-    target=$script_dir/open_console.sh
-    target=${target//\\/\\\\}; target=${target//\"/\\\"}
-    target=${target//\`/\\\`}; target=${target//\$/\\\$}
+    quote() {
+      local value=$1
+      value=${value//\\/\\\\}; value=${value//\"/\\\"}
+      value=${value//\`/\\\`}; value=${value//\$/\\\$}
+      printf '"%s"' "$value"
+    }
+    target=$(quote "$script_dir/open_console.sh")
     {
       printf '[Desktop Entry]\nType=Application\nVersion=1.0\nName=Mocap Setup\n'
       printf 'Comment=Open the mocap session setup console\n'
-      printf 'Exec=bash "%s"\n' "$target"
+      printf 'Exec=bash %s\n' "$target"
       printf 'Icon=applications-engineering\nTerminal=false\nStartupNotify=true\n'
-      printf 'Categories=Utility;Engineering;\n'
+      printf 'Categories=Utility;Engineering;\nActions=stop;\n\n'
+      printf '[Desktop Action stop]\nName=Stop the Setup console\n'
+      printf 'Exec=bash %s --stop\n' "$target"
     } > "$entry.tmp"
     mv -- "$entry.tmp" "$entry"
     printf 'Added "Mocap Setup" to the applications menu (%s).\n' "$entry"
+    k1_entry=$applications/mocap-k1-tests.desktop
+    if [[ -x $venv_python ]] &&
+        "$venv_python" -c 'import booster_robotics_sdk_python, tkinter' >/dev/null 2>&1; then
+      {
+        printf '[Desktop Entry]\nType=Application\nVersion=1.0\nName=K1 Hardware Tests\n'
+        printf 'Comment=Booster K1 step-by-step hardware tests\n'
+        printf 'Exec=%s %s\n' "$(quote "$venv_python")" "$(quote "$repo_root/tools/control/k1_commission_gui.py")"
+        printf 'Path=%s\n' "$repo_root"
+        printf 'Icon=applications-science\nTerminal=false\nStartupNotify=true\n'
+        printf 'Categories=Utility;Engineering;\n'
+      } > "$k1_entry.tmp"
+      mv -- "$k1_entry.tmp" "$k1_entry"
+      printf 'Added "K1 Hardware Tests" to the applications menu (%s).\n' "$k1_entry"
+    else
+      rm -f -- "$k1_entry"
+      printf 'K1 test tools not installed: no "K1 Hardware Tests" menu entry.\n'
+    fi
     exit 0 ;;
   stop)
     if stop_console; then
-      printf 'Stopped the Setup console.\n'
+      message='Stopped the Setup console.'
     else
-      printf 'No Setup console was started by this script.\n'
+      message='No Setup console was started by this script.'
     fi
+    printf '%s\n' "$message"
+    # The menu's "Stop the Setup console" has no terminal: show the outcome.
+    [[ -t 1 ]] || notify-send 'Mocap Setup' "$message" >/dev/null 2>&1 || true
     exit 0 ;;
 esac
 

@@ -221,6 +221,22 @@ if (( system_packages )); then
   ubuntu_supported || die "--system-packages supports Ubuntu 22.04/24.04 only"
 fi
 
+# One lock for the K1 test window and every install: this script changes the
+# project .venv the window runs on. Held until this script exits (the kernel
+# releases it, also on failure or Ctrl+C); the window refuses to open meanwhile.
+k1_lock=${XDG_STATE_HOME:-${HOME:-}/.local/state}/mocap-g1/k1-tests.lock
+if (( dry_run )); then
+  printf '# Lock (not taken in a dry run): flock -n %q\n' "$k1_lock"
+else
+  [[ -n ${XDG_STATE_HOME:-}${HOME:-} ]] || die "HOME is not set"
+  mkdir -p -- "${k1_lock%/*}"
+  exec {k1_lock_fd}>>"$k1_lock"
+  if ! flock -n "$k1_lock_fd"; then
+    printf 'Close the K1 test window first (or wait for the other install to finish): %s is held.\n' "$k1_lock" >&2
+    exit 2
+  fi
+fi
+
 if (( system_packages )); then
   stage='Ubuntu packages'
   packages=(git python3 python3-venv python3-pip build-essential ripgrep iproute2)
@@ -328,6 +344,10 @@ else
 fi
 printf 'This script cannot activate its caller shell. Activate the project environment with:\n'
 printf '  source %q\n' "$repo_root/.venv/bin/activate"
+
+if [[ -n ${k1_lock_fd:-} ]]; then
+  exec {k1_lock_fd}>&-  # release now: the Setup console started below must not inherit the lock
+fi
 
 if (( wizard && ! dry_run )) && [[ $profile != core ]]; then
   bash "$repo_root/tools/setup/open_console.sh" --install-shortcut ||
