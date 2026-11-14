@@ -75,7 +75,7 @@ The Setup console walks you through every step with buttons: enter the session d
 
 When a Booster K1 is on site, test it step by step before it replays any motion. The script `tools/control/k1_commission.py` takes the robot through twelve small steps on a hoist: PC check, read-only probe and 3D mirror, zero check, takeover and release, hold, balance, command loss, joint signs, gains, and the acceptance record. Each step shows its plan before the robot moves, stops and releases the arms when a check fails, and saves its evidence. The acceptance record unlocks the K1 arm replay (`tools/control/k1_arm_bridge.py`). Every step can be practised first on a fake robot.
 
-You need an Ubuntu PC wired to the robot (the Windows app cannot drive it), a hoist and two people. Install with `bash tools/setup/install.sh recorded --with-booster`, then follow the **[K1 hardware test guide](docs/k1-bringup-runbook.md)** word for word. Nothing in this code has run on a real K1 yet.
+You need an Ubuntu PC wired to the robot (the Windows app cannot drive it), a hoist and two people. Install with `bash tools/setup/install.sh recorded --with-booster`, then follow the **[K1 hardware test guide](docs/k1-bringup-runbook.md)** word for word. The easiest way is the test window, `.venv/bin/python tools/control/k1_commission_gui.py`: the same steps as buttons, with a live log and a red alarm if a release is not confirmed. Nothing in this code has run on a real K1 yet.
 
 ## Guides
 

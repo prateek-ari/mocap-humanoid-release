@@ -224,6 +224,7 @@ fi
 if (( system_packages )); then
   stage='Ubuntu packages'
   packages=(git python3 python3-venv python3-pip build-essential ripgrep iproute2)
+  (( ! with_booster )) || packages+=(python3-tk)  # the K1 test window (k1_commission_gui.py)
   missing=("${packages[@]}")
   if (( ! dry_run )); then
     # Skip apt (and its sudo prompt) when everything is already installed.

@@ -9,6 +9,10 @@ little as possible, checks the result, and saves the evidence. The last step wri
 are safe: the robot hangs in a hoist, every motion is small and slow, and every step stops and
 releases the arms when something looks wrong.
 
+**The easiest way to run the steps is the test window** (a GUI with buttons; see
+[The test window](#the-test-window)). It runs the same script, so everything in this guide
+applies to it.
+
 ## Stop rules (read first)
 
 - The robot hangs in a **hoist** for every step. The hoist must take the robot's weight if it
@@ -103,6 +107,47 @@ send to the developers" below).
 
 In the commands below, `T=".venv/bin/python tools/control/k1_commission.py"` and
 `S=<the session folder that probe printed>`.
+
+## The test window
+
+```bash
+.venv/bin/python tools/control/k1_commission_gui.py
+```
+
+A window with the twelve steps as buttons. It needs a screen and Tk (`sudo apt install
+python3-tk`; `install.sh --with-booster --system-packages` installs it). It does not move the
+robot by itself: each step runs the same `k1_commission.py` command as this guide (step 12 runs
+`k1_arm_bridge.py`), with the same checks, limits and evidence.
+
+- **Top bar:** grey **PRACTICE** (fake robot) or red **REAL ROBOT**. The real stop is always the
+  remote: LT+BACK.
+- **Robot connection:** transport (`fake` to practise, `booster` for the robot), this PC's
+  interface or address (`--net`), the robot's IP, the DDS domain, the robot mode you set with the
+  remote, and the K1 model (`K1_serial.xml`, **Browse...**). Fill in **Attested serial** and
+  **Firmware** only when the robot cannot report its serial (step 2).
+- **Steps (left):** each step's evidence in the open session: green = valid, red = failed or no
+  longer valid (with the reason), orange = interrupted (`INCOMPLETE`), grey = not run, blue = a file
+  was saved (mirror ranges, the record; the record turns red "STALE" when a step changed after it).
+  **2 · Probe** starts a new session; **Open session...** opens an earlier one.
+- **Step panel (right):** what the step does, whether the robot moves, its settings (hold seconds,
+  command-loss gap, gains level and kp/kd, your name and the gains run for the record, the
+  recording for the replay), **Run step** and the red **STOP step**. STOP is Ctrl-C to the script:
+  it stops and releases the arms. If anything looks wrong, use the remote first.
+- **The tool asks:** questions appear as buttons. Before every takeover the window shows the plan
+  and the checklist; **All of the above is true: start** starts the step, **Cancel** stops it with
+  nothing sent to the robot. Yes/No questions get **Yes** and **No**; measurements and names get a
+  text field and **Send**. Each answer is sent once.
+- **Log (bottom):** the script's output, live: PASS in green, FAIL and errors in red. A yellow
+  **What to check** box explains a failure. Each run's log is also saved in
+  `$S/gui-logs/`; **Open session folder** and **Copy log** help when you send it to the developers.
+- **Red alarm:** when a release is not confirmed, or a run ends abnormally (crash, killed, an
+  interrupted attempt), a red bar says **stop the robot with the remote now**. Nothing else runs
+  until you press **I have stopped the robot with the remote**.
+- **The mirror (step 3)** runs beside the other steps; **Close mirror** stops it. Closing the
+  window while a step runs asks first, stops the step and waits for its release. If the window
+  itself crashes, the script gets Ctrl-C and releases the arms.
+
+Practise the whole ladder in the window with transport `fake` before the robot arrives.
 
 ## Quick reference
 
@@ -372,7 +417,7 @@ must be rerun too; `status` shows what.
 ### What to send to the developers
 
 - The whole session folder (`k1-commissioning/<session>/`), zipped. It holds the probe report, every
-  attempt with its tick log, the mirror ranges and the record.
+  attempt with its tick log, the mirror ranges, the record and the test window's logs (`gui-logs/`).
 - The values from "What to find out about the robot first" (IP, domain, firmware, serial, remote stop).
 - The output of `$T status --session $S`.
 - A phone video of any step that looked wrong, with the mirror visible if possible.

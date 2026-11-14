@@ -284,8 +284,8 @@ This step is for the day the Booster K1 is on site. It moves a real robot, so fo
 2. **PC:** an Ubuntu 22.04 or 24.04 PC wired to the robot, address `192.168.10.10/24`. The Windows app cannot drive the robot (the Booster SDK is Linux-only).
 3. **Robot facts first:** check the robot's IP address (Booster default `192.168.10.102`), firmware (the SDK expects 1.8.0), DDS domain, serial number and the remote's emergency stop against Booster's manual. The guide's table "What to find out about the robot first" lists each one.
 4. **Install:** `bash tools/setup/install.sh recorded --with-booster`.
-5. **Practise first:** run every step on the practice robot: `.venv/bin/python tools/control/k1_commission.py probe --model ~/mocap-runtime/GMR/assets/booster_k1/K1_serial.xml`, then follow the **Next:** line each step prints.
-6. **On the robot:** the same steps with `--transport booster --net 192.168.10.10` on `preflight` and `probe`: probe, mirror, zero-check, quick-release, hold, balance, command-loss, signs, gains, record. Each step shows its plan and waits for `yes` before the robot moves, and stops and releases the arms when a check fails.
+5. **Practise first:** open the test window, `.venv/bin/python tools/control/k1_commission_gui.py`, keep transport `fake`, choose the K1 model (`~/mocap-runtime/GMR/assets/booster_k1/K1_serial.xml`) and click through the steps from **1 · Preflight**. Without a screen, use the script: `.venv/bin/python tools/control/k1_commission.py probe --model <K1_serial.xml>`, then follow the **Next:** line each step prints.
+6. **On the robot:** the same steps with transport `booster` and `--net 192.168.10.10` (in the window: **Transport** and **PC interface or IP**): probe, mirror, zero-check, quick-release, hold, balance, command-loss, signs, gains, record. Each step shows its plan and waits for `yes` before the robot moves, and stops and releases the arms when a check fails.
 7. **Status:** `.venv/bin/python tools/control/k1_commission.py status --session <folder>` shows which steps passed and what to run next.
 
 If a step fails, read its **What to check** line and the guide's failure table before you run it again.
