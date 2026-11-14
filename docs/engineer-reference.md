@@ -98,7 +98,7 @@ source session.env
 | 03 · Save session | `bash tools/setup/new_session.sh` |
 | 03 · Run system check | `.venv/bin/python tools/checks/setup_doctor.py live` (recorded: `recorded --workspace "$MOCAP_WS" --robot "$ROBOT"`) |
 | 06 · Run 30-second check | `tools/xsens/live_operator.sh acceptance`, then copy `artifacts/xsens-live/<newest>/stream-acceptance.json` to `$SESSION_DIR` |
-| 07 · Start live simulation | `tools/xsens/live_operator.sh gmr --robot "$ROBOT" --human-height "$HUMAN_HEIGHT_M"` (add `--calibrate-after 5`, `--record-video`); Ctrl+C stops it |
+| 07 · Start live simulation | `tools/xsens/live_operator.sh gmr --robot "$ROBOT" --human-height "$HUMAN_HEIGHT_M"` (add `--calibrate-after 5`, `--record-video`; K1 only: `--robot-stream udp://127.0.0.1:47011` for the K1 window's live arms); Ctrl+C stops it |
 | 07 · Stop leftover viewer | `docker stop gmr-xsens-live` |
 | 08 · Check files | `rg -n '^(Frames:\|Frame Time:)' "$MOTION_BVH" "$NPOSE_BVH"` and `sha256sum "$MOTION_BVH" "$NPOSE_BVH" > "$SESSION_DIR/bvh-sha256.txt"` |
 | 11 · Save report | `git rev-parse HEAD > "$SESSION_DIR/project-revision.txt"` and `.venv/bin/python tools/checks/setup_doctor.py core --with-operator --json > "$SESSION_DIR/core-doctor.json"` |
@@ -262,7 +262,7 @@ Expect `/link_states`, `/joint_states`, `/tf`, `/com` and `/diagnostics` while X
 
 ### Live viewer behaviour
 
-`tools/xsens/live_operator.sh gmr --robot booster_k1|unitree_g1|booster_t1_29dof` loads the robot (22-joint K1, the default; 29-joint G1 or 27-hinge T1), retargets the newest MXTP02 frame and ignores MXTP20. Space enables waist/arm tracking; R resets/rearms from the current pose; N (or `--calibrate-after SECONDS`) runs the neutral-pose calibration. On a stale/hard-timeout latch, restore the source and inspect the cause before pressing R. Legs and the free base are kinematic preview. Reported FPS and latency do not measure full suit-to-display latency. See [the live implementation](../tools/xsens/live_g1_sim.py).
+`tools/xsens/live_operator.sh gmr --robot booster_k1|unitree_g1|booster_t1_29dof` loads the robot (22-joint K1, the default; 29-joint G1 or 27-hinge T1), retargets the newest MXTP02 frame and ignores MXTP20. Space enables waist/arm tracking; R resets/rearms from the current pose; N (or `--calibrate-after SECONDS`) runs the neutral-pose calibration. On a stale/hard-timeout latch, restore the source and inspect the cause before pressing R. Legs and the free base are kinematic preview. Reported FPS and latency do not measure full suit-to-display latency. With `--robot-stream udp://127.0.0.1:PORT` (K1 only, loopback only) the tool also sends each accepted, filtered arm reference, with the suit receive time, sample counter, calibration epoch and tracking flag, to the K1 live bridge (`tools/control/k1_live_bridge.py`, [K1 hardware test guide](k1-bringup-runbook.md#k4--live-arms-k1_live_bridgepy)); a send failure is reported once and the simulation goes on. See [the live implementation](../tools/xsens/live_g1_sim.py).
 
 What the live viewer does, and why (measured on a recorded MVN take replayed as MXTP02):
 

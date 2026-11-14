@@ -120,14 +120,14 @@ Setup console (step 13). From a terminal:
 .venv/bin/python tools/control/k1_commission_gui.py
 ```
 
-A window with the twelve steps as buttons. It needs a screen and Tk (**Install Tk** in step 13,
+A window with the thirteen steps as buttons. It needs a screen and Tk (**Install Tk** in step 13,
 or `sudo apt install python3-tk`; `install.sh --with-booster --system-packages` installs it).
 Only one test window opens at a time: a second launch (menu, console or terminal) says "already
 open, or an install is running" and exits. The installer refuses to run while the window is open
 ("Close the K1 test window first"), because it changes the Python environment the window runs on.
 Shutting down the Setup console does not close the window or stop a running step. It does not move the
 robot by itself: each step runs the same `k1_commission.py` command as this guide (step 12 runs
-`k1_arm_bridge.py`), with the same checks, limits and evidence.
+`k1_arm_bridge.py`, step 13 runs `k1_live_bridge.py`), with the same checks, limits and evidence.
 
 - **Top bar:** grey **PRACTICE** (fake robot) or red **REAL ROBOT**. The real stop is always the
   remote: LT+BACK.
@@ -165,8 +165,33 @@ robot by itself: each step runs the same `k1_commission.py` command as this guid
   window while a step runs asks first, stops the step and waits for its release. If the window
   itself crashes, the script gets Ctrl-C and releases the arms.
 - **Step 12:** **Browse...** opens the Setup console's sessions folder (`~/mocap-sessions`), and the
-  panel names the newest K1 preview there as a hint. Choose the qualified recording yourself;
-  choosing another file clears the tick.
+  panel names the newest K1 preview there as a hint. Choose the recording yourself; choosing
+  another file clears the tick. **Stage** picks `hoist` (default) or `standing`; the window passes
+  the session, so each replay is an attempt there and a PASS goes to the stage ledger.
+- **Step 13 · Live arms:** the arms follow the performer (see [K4 · live
+  arms](#k4--live-arms-k1_live_bridgepy)). Choose **Stage** (`hoist`, or `standing` once the gate
+  allows it), **Time limit** (seconds of following, default 120, max 600), **Stream port** (default
+  47011, the live tool's `--robot-stream` port) and **Run**: **Following**, **Stream-loss drill** or
+  **STOP drill**. On the real robot, a stage the gate refuses is locked: the panel lists the reasons
+  (for example "S1r · K3 replay standing: no PASS for this robot") and **Run step** stays grey.
+  Practice is never locked.
+  - While it runs, a coloured bar above the log shows the stream: state (waiting, aligning,
+    following, lag-hold, stopping, released), packets per second, the age of the newest suit frame,
+    the calibration epoch, tracking on/off, the arm joint furthest from its target, the seconds of
+    following and the release (requested, confirmed or failed). Green = following, orange = holding
+    or stopping, blue = waiting or aligning.
+  - **Drills:** for the stream-loss drill, stop the stream while the arms follow (practice: **Stop
+    practice sender**; real robot: stop the live simulation). For the STOP drill, press **STOP
+    step** while the arms follow.
+  - **Evaluate stage** (with your name) judges this session's attempts and writes the stage PASS to
+    the ledger.
+  - **Start practice sender** (practice only) streams a slow arm pattern instead of the suit, so
+    you can rehearse the whole step. It stops with the step, or when you press it again.
+- **Stage ladder** (button in the log bar and in step 13) lists S0, S0r, S1, S1r and S2 for the open
+  session's robot: **passed** (date), **locked** (the first reason), **revoked** (why), or **no longer
+  valid** (for example an evidence file changed). A practice session shows the PRACTICE ledger: its
+  passes unlock nothing. Rows 12 and 13 in the step list show the same ledger state. The ladder
+  updates after every run.
 
 Practise the whole ladder in the window with transport `fake` before the robot arrives.
 
@@ -186,6 +211,7 @@ Practise the whole ladder in the window with transport `fake` before the robot a
 | 10 | gains | `$T gains --session $S --level L1 --kp 20 --kd 1` (then L2, L3) | up to 17° per joint | 21-24 s each |
 | 11 | record | `$T record --session $S --operator "<your name>"` | no | — |
 | 12 | replay | `.venv/bin/python tools/control/k1_arm_bridge.py …` (see step 12) | the recording | `--duration 10` |
+| 13 | live arms | `.venv/bin/python tools/control/k1_live_bridge.py …` (see [K4](#k4--live-arms-k1_live_bridgepy)) | the performer's arm motion | `--time-limit 120` |
 | — | status | `$T status --session $S` | no | — |
 
 Motion steps also take `--mode prepare` (default walking) and, for a robot that cannot report its
@@ -392,26 +418,38 @@ Checks that every step is valid in this session, lists the passed gains runs and
 approve, asks two questions for later phases (does Booster keep walking while the arms are custom;
 which controller owns the head joints), shows the whole record including the zero-check scope, and
 writes it when you type your name. It stores, for each field, the attempt and its SHA-256, and
-writes `$S/k1-acceptance.json`. It then prints the first replay command.
+writes `$S/k1-acceptance.json`. It also registers S0 (`acceptance`) in the robot's **stage
+ledger**, `<root>/<serial>/stages.json` (`<root>` is `$K1_COMMISSIONING_ROOT`, else the repository's
+`k1-commissioning/`), with the record and every attempt it cites as evidence; a practice record goes
+to `<root>/PRACTICE/stages.json`, which unlocks nothing. It then prints the first replay command.
 
-### Step 12 · first real replay
+### Step 12 · first real replay (stage `replay@hoist`)
 
-This release has no automatic qualification for recordings, so check the recording yourself.
-Use a short, slow K1 recording with an approved calibration (see "Before the robot arrives",
-item 5). Watch its whole preview motion first (Setup console, or
+The recording: a K1 retarget from the Setup console (or `retarget_robot_recorded.py --robot
+booster_k1 --arm-mode config`) is clamped to the official K1 joint limits and marked
+`arm_replay_eligible`; the real replay accepts it for the arms. Other preview recordings are
+refused. This release has no automatic qualification for recordings, so check the recording
+yourself: use a short, slow K1 recording with an approved calibration (see "Before the robot
+arrives", item 5), watch its whole preview motion first (Setup console, or
 `tools/retarget/render_robot_motion.py`), and do not use a recording where an arm passes through
-the body or a joint stays at the end of its range. Then, on the hoist:
+the body. Then, on the hoist:
 
 ```bash
 .venv/bin/python tools/control/k1_arm_bridge.py <motion.pkl> --transport booster \
-  --net 192.168.10.10 --acceptance-record $S/k1-acceptance.json \
+  --net 192.168.10.10 --session $S --stage hoist \
   --model <K1_serial.xml> --duration 10 \
-  --yes-i-have-read-the-unverified-section --jsonl first-replay.jsonl
+  --yes-i-have-read-the-unverified-section
 ```
 
-The replay takes kp/kd, speed and acceleration from the record. `--model` must be the model the
-recording was retargeted on. Ctrl-C stops cleanly: it slows the arms to rest and releases them.
-Keep the JSONL tick log with the session folder.
+The replay is a gated stage. It refuses unless the stage ledger holds a valid S0 for this robot,
+firmware and SDK bindings (evidence unchanged, not revoked, at most 30 days old) and
+`$S/k1-acceptance.json` is the record registered there; `--stage standing` needs live arms on the
+hoist. It takes kp/kd, speed and acceleration from the record. `--model` must be the model the
+recording was retargeted on. Each run writes an attempt and its tick log into `$S/attempts/`.
+**PASS** (written to the ledger, with the exact settings it ran with): at least 10 s played to the
+end, no fault, release confirmed, tracking p95 below 0.15 rad. A release that is not confirmed, or
+a fall, **revokes** S0: redo S0 before the next replay. Ctrl-C stops cleanly (slows the arms to
+rest and releases them) and counts as a FAIL.
 
 ## When a step fails
 
@@ -515,6 +553,47 @@ approved pair.
 
 ## After day one
 
-Replay of recordings (step 12) is the only robot motion in this release. Keep the robot on the
-hoist for the first replays, and use a spotter when it later stands free. Live teleoperation,
-walking, head tracking and whole-body tracking on the K1 are later work and not in this release.
+The robot moves in this release only through the stage ladder: S0 (steps 1-11, the acceptance
+record), S0r replay on the hoist (step 12), S1 live arms on the hoist (step 13), S1r replay
+standing, S2 live arms standing. Each stage stays locked until the one before it passed for this
+robot. Keep the robot on the hoist for S0r and S1, and use a spotter when it stands free. Walking,
+head tracking and whole-body tracking on the K1 are later work and not in this release.
+
+## K4 · live arms (`k1_live_bridge.py`)
+
+The live tool sends each accepted, filtered K1 arm reference over UDP on this PC; the bridge
+follows it behind the same envelope, motion lock, contact check and acceptance record as replay.
+On the real robot the stage gate must allow `live-arms@hoist` (after `replay@hoist`) or
+`live-arms@standing` (after `replay@standing`). Practice on the fake robot is never locked and
+writes only the PRACTICE ledger.
+
+```bash
+# 1. the live simulation with the stream on: in the Setup console, step 07, tick
+#    "Send the arms to the K1 window"; or from a terminal (Docker, --network host):
+source session.env
+bash tools/xsens/live_operator.sh gmr --robot booster_k1 --robot-stream udp://127.0.0.1:47011
+# 2. the bridge, in the session from probe (fake session = practice robot)
+.venv/bin/python tools/control/k1_live_bridge.py --session <DIR> --stage hoist \
+    --acceptance-record <k1-acceptance.json>         # real robot only
+# practice without the suit: a slow pattern instead of the live tool
+.venv/bin/python tools/control/k1_live_synth.py --port 47011 --seconds 120
+```
+
+- **One run = one takeover/release cycle.** The arms take over only when the stream is fresh,
+  Calibrate was done, Tracking is on and the performer's arms are within 0.4 rad of the robot's
+  for 1 s. They first align at 0.2 rad/s or less, then follow.
+- **Stops.** STOP (Ctrl-C) or the time limit (default 120 s, max 600 s): the arms slow down, then go
+  back to Booster. A new Calibrate, a restarted live tool or Tracking off also stops: start again.
+  A performer more than 0.35 rad ahead for 0.5 s makes the arms hold, then re-align; after 3 s of
+  that they stop. Stream loss: hold at 0.1 s, release at 0.1 s + braking time + 0.1 s (the bridge
+  refuses speed and acceleration caps that make this longer than 1.5 s).
+- **Hoist.** Until you answer yes to the strap-clearance question, shoulder pitch and roll stay
+  within 0.6 rad of rest.
+- **Drills** are separate runs: `--drill stream-loss` (stop the live tool while the arms follow)
+  and `--drill stop` (press STOP while the arms follow).
+- **Stage PASS:** `--evaluate --operator "<name>"` checks the session (600 s of following in runs
+  ended by STOP or the time limit, 5 cycles, every arm joint over half its range and at 80 % of the
+  speed cap, tracking p95 under 0.15 rad, no unconfirmed release, contact or stale-state fault, both
+  drills PASS) and writes the ledger entry. After a firmware or SDK change, 120 s and the drills
+  requalify a stage that passed before.
+- **In the test window** this is step 13 (see [The test window](#the-test-window)).
