@@ -59,6 +59,8 @@ const STEP_META: Record<SetupStep, StepMeta> = {
 
 /** Live-route jobs that show the viewer in the gmr-xsens-live container; Stop ends them normally. */
 const VIEWER_KINDS: readonly string[] = ['live', 'compare']
+/** Where the live tool sends the K1 arm references; the K1 window's Live arms step listens here. */
+const ROBOT_STREAM_URL = 'udp://127.0.0.1:47011'
 
 /** Wording that differs on a Windows console; the Linux text above is the default. */
 const WINDOWS_STEP_META: Partial<Record<SetupStep, Pick<StepMeta, 'title' | 'instruction'>>> = {
@@ -422,6 +424,7 @@ export function SetupView({ client, initial, hidden = false }: SetupViewProps) {
   const [autoCalibrate, setAutoCalibrate] = useState(false)
   const [calibrateAfter, setCalibrateAfter] = useState('5')
   const [liveVideo, setLiveVideo] = useState(false)
+  const [robotStream, setRobotStream] = useState(false)
   const [renderMotion, setRenderMotion] = useState<'preview' | 'npose'>('preview')
   const [playing, setPlaying] = useState<string | null>(null)
   const [k1, setK1] = useState<K1Status | null>(null)
@@ -1154,6 +1157,8 @@ export function SetupView({ client, initial, hidden = false }: SetupViewProps) {
     const videos = setup.files.filter((file) => file.kind === 'video' && /-live/.test(file.name))
     const liveJob = jobs.find((job) => VIEWER_KINDS.includes(job.kind))
     const liveRunning = liveJob?.state === 'running'
+    // The K1 window (Booster SDK) runs on the Ubuntu PC only.
+    const streamable = robotId === 'booster_k1' && !windows
     return (
       <>
         <fieldset className="group">
@@ -1174,10 +1179,16 @@ export function SetupView({ client, initial, hidden = false }: SetupViewProps) {
               <input type="checkbox" checked={liveVideo} onChange={(event) => setLiveVideo(event.target.checked)} />
               <span>Record video</span>
             </label>
+            {streamable && (
+              <label className="check-option">
+                <input type="checkbox" checked={robotStream} onChange={(event) => setRobotStream(event.target.checked)} />
+                <span>Send the arms to the K1 window <small className="mono">{ROBOT_STREAM_URL}</small></span>
+              </label>
+            )}
           </div>
           {calibrateInvalid && <span className="field-error" role="alert">Use 0.5 to 60 seconds.</span>}
           <div className="setup-actions">
-            {runKey('live', 'live', 'Start live simulation', <Play aria-hidden="true" />, { calibrate_after_s: autoCalibrate ? calibrate : null, record_video: liveVideo }, true, calibrateInvalid || noDisplay)}
+            {runKey('live', 'live', 'Start live simulation', <Play aria-hidden="true" />, { calibrate_after_s: autoCalibrate ? calibrate : null, record_video: liveVideo, ...(streamable ? { robot_stream: robotStream } : {}) }, true, calibrateInvalid || noDisplay)}
             {setup.desktop_tools && runKey('live', 'compare', 'Start G1 + T1 side by side', <Columns2 aria-hidden="true" />, { calibrate_after_s: autoCalibrate ? calibrate : null }, false, calibrateInvalid || noDisplay)}
             {liveRunning && liveJob && (
               <button type="button" className="panel-key setup-run is-stop" disabled={isStopping(liveJob.id)} onClick={() => void stopJob(liveJob)}>

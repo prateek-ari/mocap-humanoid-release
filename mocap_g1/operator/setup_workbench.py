@@ -101,6 +101,8 @@ ROBOTS = ("booster_k1", "unitree_g1", "booster_t1_29dof")
 #: tool's arm abduction (no wrist, so no hand target to point the forearm).
 CONFIG_ARM_ROBOTS = ("booster_k1",)
 XSENS_UDP_PORT = "5555"
+#: ``--robot-stream`` target of a K1 live job: the K1 window's Live arms step (k1_live_bridge.py).
+ROBOT_STREAM_URL = "udp://127.0.0.1:47011"
 JOB_KINDS = ("doctor", "acceptance", "live", "bvh_check", "retarget", "render", "save",
              "compare", "k1_install")
 JOB_STATES = ("running", "passed", "failed", "stopped")
@@ -1520,7 +1522,10 @@ class SetupWorkbench:
                     raise bad("calibrate_after_s must be a number of seconds or null")
                 if not (math.isfinite(calibrate) and 0.5 <= calibrate <= 60):
                     raise bad("calibrate_after_s must be 0.5–60 s")
-            return {"calibrate_after_s": calibrate, "record_video": flag("record_video")}
+            live = {"calibrate_after_s": calibrate, "record_video": flag("record_video")}
+            if flag("robot_stream"):  # K1 only, checked against the session in start_job
+                live["robot_stream"] = True
+            return live
         # Outputs are always overwritten; an ``overwrite`` option is accepted and ignored.
         if kind == "retarget":
             return {"mode": choice("mode", ("preview", "npose"))}
@@ -1575,6 +1580,12 @@ class SetupWorkbench:
                 "Booster K1 arms are aligned by its IK config in the preview motion; "
                 "an N-pose motion would leave its forearms free. Use Make preview motion.",
                 code="npose_not_supported",
+            )
+        if kind == "live" and options.get("robot_stream") and (
+                session["robot"] != "booster_k1" or self.windows):
+            raise SetupError(
+                "Send the arms to the K1 window is for the Booster K1 on the Ubuntu PC.",
+                code="robot_stream_not_supported",
             )
         if kind in ("live", "render", "compare") and not self._display_available():
             raise SetupError(NO_DISPLAY_HINT, code="no_display")
@@ -1977,6 +1988,8 @@ class SetupWorkbench:
             argv += ["--calibrate-after", _format_number(options["calibrate_after_s"])]
         if options["record_video"]:
             argv.append("--record-video")
+        if options.get("robot_stream"):
+            argv += ["--robot-stream", ROBOT_STREAM_URL]
         return argv
 
     def _run_live(self, job, session, raw, options) -> tuple[int, bool]:

@@ -750,6 +750,24 @@ describe('Setup desktop tools (Linux checkout console)', () => {
     expect(screen.getByRole('button', { name: 'Allow in firewall' })).toBeTruthy()
   })
 
+  it('offers the K1 arm stream on step 07 for the K1 only, with its port', async () => {
+    let setupClient = await renderApp(desktop())
+    goTo('live')
+    expect(screen.queryByRole('checkbox', { name: /Send the arms to the K1 window/ })).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: 'Start live simulation' }))
+    await flush()
+    expect(setupClient.starts).toHaveBeenCalledWith('live', { calibrate_after_s: null, record_video: false })
+    cleanup()
+    setupClient = await renderApp(desktop({ session: { ...values, robot: 'booster_k1' } }))
+    goTo('live')
+    const box = screen.getByRole('checkbox', { name: /Send the arms to the K1 window/ })
+    expect(screen.getByText('udp://127.0.0.1:47011')).toBeTruthy()
+    fireEvent.click(box)
+    fireEvent.click(screen.getByRole('button', { name: 'Start live simulation' }))
+    await flush()
+    expect(setupClient.starts).toHaveBeenCalledWith('live', { calibrate_after_s: null, record_video: false, robot_stream: true })
+  })
+
   it('starts G1 + T1 side by side with the auto-calibrate value', async () => {
     const setupClient = await renderApp(desktop())
     goTo('live')

@@ -43,11 +43,14 @@ from mocap_g1.live_filter import (
     measure_step_lag,
     upsampler_lag_ms,
 )
+from mocap_g1.io_utils import sha256_file
+from mocap_g1.k1_live_packet import LivePacketSender, parse_stream_url
 from mocap_g1.live_arm_alignment import ArmAlignmentError, LiveArmAlignment, floor_offset_m
 from mocap_g1.live_arm_clearance import ArmAbduction, abduct_frame_rotations
 from mocap_g1.live_ik import configure_live_ik_limits, install_solve_ik_fix
 from mocap_g1.live_robots import (
     ARM_ALIGNMENTS,
+    K1_UPPER_BODY_JOINTS,
     LIVE_ROBOTS,
     MVN_ARM_BODIES,
     LiveRobot,
@@ -176,6 +179,19 @@ def _build_live_conditioning(
     except LiveFilterError as exc:
         parser.error(str(exc))
     return filter_config, upsampler_config
+
+
+def _robot_stream_address(args: argparse.Namespace,
+                          parser: argparse.ArgumentParser) -> tuple[str, int] | None:
+    """``--robot-stream`` checked: K1 only, loopback."""
+    if args.robot_stream is None:
+        return None
+    if args.robot != "booster_k1":
+        parser.error("--robot-stream is for --robot booster_k1 only")
+    try:
+        return parse_stream_url(args.robot_stream)
+    except ValueError as exc:
+        parser.error(f"--robot-stream: {exc}")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -334,6 +350,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--video-path", default=None, help="default: artifacts/xsens-live/<robot>-live.mp4"
+    )
+    parser.add_argument(
+        "--robot-stream",
+        default=None,
+        metavar="udp://127.0.0.1:PORT",
+        help=(
+            "booster_k1 only: also send each accepted, filtered arm reference to the K1 "
+            "live bridge (tools/control/k1_live_bridge.py) on this loopback port; off by default"
+        ),
     )
     return parser
 
@@ -719,6 +744,10 @@ class LiveLoop:
         self.control = control
         #: True after a successful neutral calibration (N key, stdin or --calibrate-after).
         self.calibrated = False
+        #: ``--robot-stream``: sends each accepted reference to the K1 live bridge.
+        self.robot_stream: LivePacketSender | None = None
+        #: Counts neutral calibrations that changed the reference (0 = never calibrated).
+        self.calibration_epoch = 0
         self.previous_status_key: tuple[bool, str, bool] | None = None
         #: Root height correction from the last N-key neutral calibration.
         self.floor_offset = 0.0
@@ -852,12 +881,14 @@ class LiveLoop:
         if self.arm_alignment is None:
             print("ARM ALIGNMENT unavailable for this retargeter", file=sys.stderr)
             return
+        arms_done = False  # calibrate() either raises with the old offsets restored, or applies new ones
         try:
             offsets = {}
             if self.arm_alignment.mode != "config":
                 offsets = self.arm_alignment.calibrate(
                     abduct_frame_rotations(self.pending_frame, self.abduction_deg)
                 )
+                arms_done = True
             floor = ""
             if self.feet:
                 self.retargeter.retarget(
@@ -868,8 +899,15 @@ class LiveLoop:
                 self.floor_offset = floor_offset_m(self.retargeter, self.feet)
                 floor = f"; feet placed on the floor (root {self.floor_offset:+.3f} m)"
         except Exception as exc:  # solver errors stay local, as in process_pending
-            print(f"ARM ALIGNMENT failed: {exc}; arms unchanged", file=sys.stderr)
+            if arms_done:  # only the floor failed: the arms keep their new offsets
+                self.calibrated = True
+                self.calibration_epoch += 1
+                print(f"FLOOR CALIBRATION failed: {exc}; arms calibrated, floor unchanged",
+                      file=sys.stderr)
+                return
+            print(f"ARM ALIGNMENT failed: {exc}; arms and floor unchanged", file=sys.stderr)
             return
+        self.calibration_epoch += 1
         arms = (
             f"arm orientation from the current pose ({len(offsets)} arm segments)"
             if offsets else "arms keep the IK config's orientations"
@@ -910,6 +948,11 @@ class LiveLoop:
         if timeline is not None:
             timeline.mark("filter")
         self.stats.accept_counter(self.pending_counter)
+        if self.robot_stream is not None:  # the serial loop has one solver generation: 0
+            self.robot_stream.send(reference, suit_receive_s=self.pending_source_timestamp,
+                                   counter=self.pending_counter, generation=0,
+                                   epoch=self.calibration_epoch,
+                                   enabled=bool(self.controls.enabled))
         self.pipeline.submit(
             reference,
             source_timestamp=self.pending_source_timestamp,
@@ -999,6 +1042,7 @@ def main(argv: list[str] | None = None) -> int:
     _validate_safety_args(args, parser)
     filter_config, upsampler_config = _build_live_conditioning(args, parser)
     robot = LIVE_ROBOTS[args.robot]
+    stream_address = _robot_stream_address(args, parser)
     arm_alignment_mode = args.arm_alignment or robot.default_arm_alignment
     if args.video_path is None:
         args.video_path = f"artifacts/xsens-live/{robot.label.lower()}-live.mp4"
@@ -1108,6 +1152,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     converter = GmrFrameConverter()
     viewer = None
+    robot_stream: LivePacketSender | None = None
     source_label = args.source_ip or "any source"
     print(f"Waiting for strict MXTP02 on {args.bind}:{args.port} from {source_label}...")
 
@@ -1139,6 +1184,16 @@ def main(argv: list[str] | None = None) -> int:
         abduction = robot.arm_abduction_deg if args.arm_abduction is None else args.arm_abduction
         ik_line = configure_ik(retargeter, abduction)
         arm_alignment = build_arm_alignment(retargeter, arm_alignment_mode)
+        if stream_address is not None:
+            from general_motion_retargeting import params as gmr_params
+
+            xml = getattr(gmr_params, "ROBOT_XML_DICT", {}).get(robot.key)
+            if not xml or not Path(xml).is_file():
+                print(f"ERROR: --robot-stream needs GMR's {robot.key} MJCF", file=sys.stderr)
+                return 2
+            robot_stream = LivePacketSender(
+                stream_address, model_sha256=sha256_file(Path(xml)), clock=time.monotonic,
+                arm_indices=[robot.dof_joints.index(name) for name in K1_UPPER_BODY_JOINTS])
         viewer = RobotMotionViewer(
             robot_type=args.robot,
             motion_fps=args.control_rate,
@@ -1172,7 +1227,11 @@ def main(argv: list[str] | None = None) -> int:
             emit_status=args.control_stdin,
             control=StdinControl(controls) if args.control_stdin else None,
         )
+        loop.robot_stream = robot_stream
         loop.start()
+        if robot_stream is not None:
+            print(f"ROBOT STREAM to {stream_address[0]}:{stream_address[1]} (session "
+                  f"{robot_stream.session_id}): accepted, filtered K1 arm references.")
 
         if hardware_envelope:
             print(
@@ -1226,6 +1285,8 @@ def main(argv: list[str] | None = None) -> int:
         if viewer is not None:
             viewer.close()
         receiver.close()
+        if robot_stream is not None:
+            robot_stream.close()
         for line in pipeline.report_lines():
             print(line)
 
