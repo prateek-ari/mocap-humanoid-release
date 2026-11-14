@@ -622,9 +622,13 @@ def run_motion(rig: Rig, config: K1BridgeConfig, build: Callable[[dict[str, floa
             if build is None:
                 bridge.abort("quick_release")
             else:
-                problem = post_takeover_problem(before, after, start, plan, config, rig)
-                if problem is None:
-                    problem = bridge.check(rig.clock())[0]
+                try:
+                    problem = post_takeover_problem(before, after, start, plan, config, rig)
+                    if problem is None:
+                        problem = bridge.check(rig.clock())[0]
+                except BaseException as exc:  # a bug or an I/O error: the arms go back first
+                    abort_unexpected(bridge, exc)
+                    raise
                 if problem is not None:
                     bridge.abort(f"post_takeover:{problem}")
                 else:
@@ -644,7 +648,7 @@ def run_motion(rig: Rig, config: K1BridgeConfig, build: Callable[[dict[str, floa
                         bridge.abort(f"real_time_lost:{exc}")
                     except BaseException as exc:  # a bug or an I/O error: the arms go back first
                         gate.defer()
-                        bridge.abort(f"unexpected:{exc!r}")
+                        abort_unexpected(bridge, exc)
                         raise
                     gate.defer()
                     if bridge.state == "tracking":
@@ -660,6 +664,14 @@ def run_motion(rig: Rig, config: K1BridgeConfig, build: Callable[[dict[str, floa
     if result.release_confirmed:
         result.released_drift_rad = watch_release(rig)
     return result, plan
+
+
+def abort_unexpected(bridge: K1ArmBridge, exc: BaseException) -> None:
+    """Hand the arms back after an error that will escape main(), and warn here
+    when that release is not confirmed: main() never gets to print it."""
+    bridge.abort(f"unexpected:{exc!r}")
+    if bridge.state == "release_unconfirmed":
+        print(MANUAL_STOP, file=sys.stderr)
 
 
 def post_takeover_problem(before: K1State, after: K1State, start: Mapping[str, float],

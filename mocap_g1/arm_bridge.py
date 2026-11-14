@@ -1065,6 +1065,8 @@ class G1ArmBridge:
         requires.  It refuses to arm from anything but a fresh ``LowState_``:
         never from midpoint defaults, never from the last command.
         """
+        if self.armed:  # a reset now would drop the weight mid-motion; disarm first
+            raise ArmBridgeError("cannot arm: already armed")
         now = float(now)
         if not math.isfinite(now):
             raise ArmBridgeError("cannot arm: control time must be finite")

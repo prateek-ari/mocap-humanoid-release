@@ -43,7 +43,7 @@ import os
 from pathlib import Path
 import threading
 import time
-from typing import Any
+from typing import Any, Literal, get_args
 
 import numpy as np
 
@@ -77,6 +77,10 @@ if len(K1_JOINTS) != MOTOR_COUNT or list(ARM_MOTOR_INDEX.values()) != list(range
     raise ImportError("K1 profile joint order no longer matches the SDK's JointIndexK1")
 
 STATES = ("idle", "tracking", "released", "fault_latched", "release_unconfirmed")
+#: Where a confirmed release may leave the bridge; mypy refuses any other string.
+ReleasedState = Literal["idle", "released", "fault_latched"]
+if not set(get_args(ReleasedState)) <= set(STATES):
+    raise ImportError("ReleasedState names a state outside STATES")
 
 
 class K1BridgeError(RuntimeError):
@@ -572,7 +576,7 @@ class K1ArmBridge:
         self._release_rpc("fault_latched")
         return K1Step(None, reason, self.state, age)
 
-    def _release_rpc(self, released_state: str) -> None:
+    def _release_rpc(self, released_state: ReleasedState) -> None:
         """``UpperBodyCustomControl(False)`` with retries; ``released_state`` only
         when the SDK confirms it, else ``release_unconfirmed`` (no rearm)."""
         for attempt in range(self.config.release_attempts):
