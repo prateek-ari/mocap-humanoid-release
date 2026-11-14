@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { LOG_PAGE_LINES, SetupApiError, SetupClient, isLoopbackIp, parseJobSummary, parseSetupState, parseStreamSnapshot, tildePath } from './setupApi'
+import { LOG_PAGE_LINES, SetupApiError, SetupClient, isLoopbackIp, parseJobSummary, parseK1Status, parseSetupState, parseStreamSnapshot, tildePath } from './setupApi'
 import { makeAppSetupPayload, makeStreamSnapshot, makeWindowsSetupPayload } from './test/fixtures'
 
 function respond(status: number, body: unknown): Response {
@@ -183,5 +183,29 @@ describe('desktop app client calls', () => {
     expect(String(fetchMock.mock.calls[0][0])).toBe('/api/v1/setup/jobs/j%201/control')
     expect(fetchMock.mock.calls[0][1]).toMatchObject({ method: 'POST', body: JSON.stringify({ command: 'calibrate' }) })
     await expect(client.controlJob('j-1', 'rearm')).rejects.toMatchObject({ status: 409, message: 'No live simulation is running' })
+  })
+})
+
+describe('Desktop tools', () => {
+  it('reads the firewall state and desktop tools, treating anything unknown as absent', () => {
+    expect(parseSetupState(makeWindowsSetupPayload())).toMatchObject({ firewall_state: null, desktop_tools: false })
+    expect(parseSetupState(makeWindowsSetupPayload({ firewall_state: 'active', desktop_tools: true }))).toMatchObject({ firewall_state: 'active', desktop_tools: true })
+    expect(parseSetupState(makeWindowsSetupPayload({ firewall_state: 'maybe', desktop_tools: 'yes' }))).toMatchObject({ firewall_state: null, desktop_tools: false })
+  })
+
+  it('reads a malformed K1 status as not installed and not open', () => {
+    expect(parseK1Status(null)).toMatchObject({ available: false, installed: false, window_open: false, sdk_version: null })
+    expect(parseK1Status({ available: true, sdk_version: '1.6.3', tk: 'yes', window_open: true })).toMatchObject({ available: true, sdk_version: '1.6.3', tk: false, window_open: true })
+  })
+
+  it('posts the fixed actions and maps unknown outcomes to failure', async () => {
+    const fetchMock = vi.fn<(url: string, init?: RequestInit) => Promise<Response>>(() => Promise.resolve(respond(200, { outcome: 'weird', message: 'x' })))
+    vi.stubGlobal('fetch', fetchMock)
+    const client = new SetupClient()
+    expect(await client.runPrivileged('firewall')).toEqual({ outcome: 'unavailable', message: 'x' })
+    expect(fetchMock.mock.calls[0][0]).toBe('/api/v1/setup/privileged')
+    expect(fetchMock.mock.calls[0][1]).toMatchObject({ method: 'POST', body: JSON.stringify({ action: 'firewall' }) })
+    expect(await client.openK1()).toEqual({ outcome: 'failed', message: 'x' })
+    expect(fetchMock.mock.calls[1][0]).toBe('/api/v1/setup/k1/open')
   })
 })

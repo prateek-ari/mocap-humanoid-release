@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
-import { AlertTriangle, Check, ChevronDown, Copy, FilePlus, FileSearch, Film, Play, RefreshCw, Save, Square, Stethoscope, Video } from 'lucide-react'
+import { AlertTriangle, BookOpen, Bot, Check, ChevronDown, Columns2, Copy, Download, FilePlus, FileSearch, Film, Play, Power, RefreshCw, Save, ShieldCheck, Square, Stethoscope, Video } from 'lucide-react'
 import { Lamp } from './components'
 import {
   SESSION_FIELDS,
@@ -11,6 +11,10 @@ import {
   type JobKind,
   type JobOptions,
   type JobSummary,
+  type K1OpenOutcome,
+  type K1Status,
+  type PrivilegedAction,
+  type PrivilegedOutcome,
   type SessionField,
   type SessionValues,
   type SetupClient,
@@ -20,9 +24,9 @@ import {
 } from './setupApi'
 import type { Led } from './status'
 
-export type SetupStep = 'session' | 'windows' | 'stream' | 'live' | 'bvh' | 'retarget' | 'render' | 'finish'
+export type SetupStep = 'session' | 'windows' | 'stream' | 'live' | 'bvh' | 'retarget' | 'render' | 'finish' | 'k1'
 
-export const SETUP_STEPS: readonly SetupStep[] = ['session', 'windows', 'stream', 'live', 'bvh', 'retarget', 'render', 'finish']
+export const SETUP_STEPS: readonly SetupStep[] = ['session', 'windows', 'stream', 'live', 'bvh', 'retarget', 'render', 'finish', 'k1']
 
 /** Job polling interval while a job is running. */
 export const JOB_POLL_MS = 500
@@ -45,12 +49,16 @@ const STEP_META: Record<SetupStep, StepMeta> = {
   session: { guide: '03', title: 'Session', route: null, kinds: ['doctor'], instruction: 'Fill in the values for this take, then click Save session.' },
   windows: { guide: '04–05', title: 'Windows: suit and streaming', route: 'live', kinds: [], instruction: 'On the Windows PC, set up Xsens with these values. Nothing to click here.' },
   stream: { guide: '06', title: 'Check the stream', route: 'live', kinds: ['acceptance'], instruction: 'Start streaming in Xsens, then click Run {n}-second check.' },
-  live: { guide: '07', title: 'Live simulation', route: 'live', kinds: ['live'], instruction: 'Click Start live simulation, then start streaming in Xsens within 60 seconds.' },
+  live: { guide: '07', title: 'Live simulation', route: 'live', kinds: ['live', 'compare'], instruction: 'Click Start live simulation, then start streaming in Xsens within 60 seconds.' },
   bvh: { guide: '08', title: 'BVH files', route: 'recorded', kinds: ['bvh_check'], instruction: 'Copy both BVH files to the paths below, then click Check files.' },
   retarget: { guide: '09', title: 'Retarget', route: 'recorded', kinds: ['retarget'], instruction: 'Click Make preview to turn the human motion into robot motion.' },
   render: { guide: '10', title: 'Watch and record', route: 'recorded', kinds: ['render'], instruction: 'Choose a motion, then click Record MP4. Let it finish.' },
   finish: { guide: '11', title: 'Finish', route: null, kinds: ['save'], instruction: 'Stop anything still running, then click Save report.' },
+  k1: { guide: '13', title: 'Real K1', route: null, kinds: ['k1_install'], instruction: 'Install the K1 test tools once, then click Open K1 test window.' },
 }
+
+/** Live-route jobs that show the viewer in the gmr-xsens-live container; Stop ends them normally. */
+const VIEWER_KINDS: readonly string[] = ['live', 'compare']
 
 /** Wording that differs on a Windows console; the Linux text above is the default. */
 const WINDOWS_STEP_META: Partial<Record<SetupStep, Pick<StepMeta, 'title' | 'instruction'>>> = {
@@ -69,14 +77,15 @@ const ROBOTS: { value: SessionValues['robot']; name: string; detail: string }[] 
 
 /** ``#setup`` or ``#setup/<step>``; ``null`` for any other hash. */
 export function parseSetupHash(hash: string): { step: SetupStep | null } | null {
-  const match = /^#setup(?:\/([a-z]+))?\/?$/.exec(hash.trim())
+  const match = /^#setup(?:\/([a-z0-9]+))?\/?$/.exec(hash.trim())
   if (!match) return null
   const step = match[1]
   return { step: step && (SETUP_STEPS as readonly string[]).includes(step) ? step as SetupStep : null }
 }
 
-export function stepsForRoute(route: SetupRoute): SetupStep[] {
-  return SETUP_STEPS.filter((step) => STEP_META[step].route === null || STEP_META[step].route === route)
+/** ``desktopTools``: the Linux checkout console, which also has step 13 (Real K1). */
+export function stepsForRoute(route: SetupRoute, desktopTools = false): SetupStep[] {
+  return SETUP_STEPS.filter((step) => (STEP_META[step].route === null || STEP_META[step].route === route) && (desktopTools || step !== 'k1'))
 }
 
 // ---------- Session draft ----------
@@ -208,7 +217,7 @@ function jobLed(job: JobSummary | undefined): Led {
   if (job.state === 'passed') return 'passed'
   if (job.state === 'failed') return 'fault'
   // Stopping the live simulation is how it normally ends.
-  return job.kind === 'live' ? 'passed' : 'off'
+  return VIEWER_KINDS.includes(job.kind) ? 'passed' : 'off'
 }
 
 function hasFile(files: SetupFile[], name: string): boolean {
@@ -223,14 +232,15 @@ function stepLeds(setup: SetupState, jobs: JobSummary[], route: SetupRoute): Rec
     session: setup.session ? 'passed' : 'off',
     windows: jobLed(latest('acceptance')) === 'passed' ? 'passed' : 'off',
     stream: jobLed(latest('acceptance')),
-    live: jobLed(latest('live')),
+    live: jobLed(jobs.find((job) => VIEWER_KINDS.includes(job.kind))),
     bvh: jobLed(latest('bvh_check')),
     retarget: orFile(jobLed(latest('retarget')), `${robot}-preview.pkl`, `${robot}-npose.pkl`),
     render: orFile(jobLed(latest('render')), `${robot}-preview.mp4`, `${robot}-npose.mp4`),
     finish: jobLed(latest('save')),
+    k1: jobLed(latest('k1_install')),
   }
   // The first unstarted step is next, unless a step failed: then the failed
-  // step is what needs attention.
+  // step is what needs attention.  The optional K1 step is never "next".
   const routeSteps = stepsForRoute(route)
   if (!routeSteps.some((step) => leds[step] === 'fault')) {
     const next = routeSteps.find((step) => leds[step] === 'off')
@@ -414,6 +424,16 @@ export function SetupView({ client, initial, hidden = false }: SetupViewProps) {
   const [liveVideo, setLiveVideo] = useState(false)
   const [renderMotion, setRenderMotion] = useState<'preview' | 'npose'>('preview')
   const [playing, setPlaying] = useState<string | null>(null)
+  const [k1, setK1] = useState<K1Status | null>(null)
+  const [k1Error, setK1Error] = useState<string | null>(null)
+  const [k1Opening, setK1Opening] = useState(false)
+  const [k1Result, setK1Result] = useState<{ outcome: K1OpenOutcome; message: string } | null>(null)
+  // One desktop password prompt at a time (firewall rule or Tk).
+  const [adminBusy, setAdminBusy] = useState<PrivilegedAction | null>(null)
+  const [adminResult, setAdminResult] = useState<{ action: PrivilegedAction; outcome: PrivilegedOutcome | 'error'; message: string } | null>(null)
+  const [confirmShutdown, setConfirmShutdown] = useState(false)
+  const [shutdownState, setShutdownState] = useState<'idle' | 'sending' | 'done'>('idle')
+  const [shutdownError, setShutdownError] = useState<string | null>(null)
   const cursorRef = useRef(new Map<string, number>())
   // One log read per job at a time, so each line range is appended once.
   const inflightRef = useRef(new Map<string, Promise<unknown>>())
@@ -442,7 +462,7 @@ export function SetupView({ client, initial, hidden = false }: SetupViewProps) {
 
   const windows = setup.platform === 'windows'
   const route: SetupRoute = draft.route === 'recorded' ? 'recorded' : 'live'
-  const steps = stepsForRoute(route)
+  const steps = stepsForRoute(route, setup.desktop_tools)
   const jobs = mergeJobs(setup.jobs, logs, lostJobs)
   const runningJob = jobs.find((job) => job.state === 'running') ?? null
   const runningId = runningJob?.id ?? null
@@ -549,6 +569,75 @@ export function SetupView({ client, initial, hidden = false }: SetupViewProps) {
       if (aliveRef.current) setLogs((current) => current[stepJobId] ? current : { ...current, [stepJobId]: { job: stepJob!, lines: [] } })
     })
   }, [client, stepJobId, stepJob])
+
+  const refreshK1 = useCallback(async () => {
+    try {
+      const status = await client.getK1()
+      if (!aliveRef.current) return
+      setK1(status)
+      setK1Error(null)
+    } catch (reason) {
+      if (aliveRef.current) setK1Error(errorMessage(reason, 'The K1 tools could not be checked.'))
+    }
+  }, [client])
+
+  // Check the K1 tools when the step opens and each time an install ends.
+  const k1InstallState = jobs.find((job) => job.kind === 'k1_install')?.state ?? null
+  useEffect(() => {
+    if (step !== 'k1' || !setup.desktop_tools || k1InstallState === 'running') return
+    let active = true
+    client.getK1().then((status) => {
+      if (!active || !aliveRef.current) return
+      setK1(status)
+      setK1Error(null)
+    }, (reason: unknown) => {
+      if (active && aliveRef.current) setK1Error(errorMessage(reason, 'The K1 tools could not be checked.'))
+    })
+    return () => { active = false }
+  }, [client, step, setup.desktop_tools, k1InstallState])
+
+  async function openK1Window() {
+    setK1Opening(true)
+    setK1Result(null)
+    try {
+      const result = await client.openK1()
+      if (!aliveRef.current) return
+      setK1Result(result)
+      void refreshK1()
+    } catch (reason) {
+      if (aliveRef.current) setK1Result({ outcome: 'failed', message: errorMessage(reason, 'The K1 test window did not open.') })
+    } finally {
+      if (aliveRef.current) setK1Opening(false)
+    }
+  }
+
+  async function runAdmin(action: PrivilegedAction) {
+    setAdminBusy(action)
+    setAdminResult(null)
+    try {
+      const result = await client.runPrivileged(action)
+      if (!aliveRef.current) return
+      setAdminResult({ action, ...result })
+      if (action === 'install_tk' && result.outcome === 'done') void refreshK1()
+    } catch (reason) {
+      if (aliveRef.current) setAdminResult({ action, outcome: 'error', message: errorMessage(reason, 'The password prompt could not be opened. Use Copy and a terminal.') })
+    } finally {
+      if (aliveRef.current) setAdminBusy(null)
+    }
+  }
+
+  async function shutdownConsole() {
+    setShutdownState('sending')
+    setShutdownError(null)
+    try {
+      await client.shutdown()
+      if (aliveRef.current) setShutdownState('done')
+    } catch (reason) {
+      if (!aliveRef.current) return
+      setShutdownState('idle')
+      setShutdownError(errorMessage(reason, 'The console did not shut down.'))
+    }
+  }
 
   function selectStep(next: SetupStep) {
     setStep(next)
@@ -711,6 +800,13 @@ export function SetupView({ client, initial, hidden = false }: SetupViewProps) {
   const stepError = stepActionError && (
     <>
       <ActionError message={stepActionError.message} />
+      {stepActionError.code === 'recorded_runtime_missing' && setup.desktop_tools && (
+        <div className="setup-actions">
+          <button type="button" className="panel-key" onClick={() => selectStep('k1')}>
+            <Download aria-hidden="true" />Install it in step 13 · Real K1
+          </button>
+        </div>
+      )}
       {stepActionError.code === 'viewer_running' && (
         <div className="setup-actions">
           <button type="button" className="panel-key" disabled={stoppingViewer} onClick={() => void stopLeftoverViewer(step)}>
@@ -741,7 +837,7 @@ export function SetupView({ client, initial, hidden = false }: SetupViewProps) {
     </button>
   )
 
-  const noSessionNote = !session && step !== 'session' && step !== 'windows' && (
+  const noSessionNote = !session && step !== 'session' && step !== 'windows' && step !== 'k1' && (
     <p className="setup-callout is-warning"><AlertTriangle aria-hidden="true" /><span>Save a session first ({windows ? 'Session step' : 'step 03'}). The buttons below stay locked until then.</span></p>
   )
 
@@ -913,6 +1009,9 @@ export function SetupView({ client, initial, hidden = false }: SetupViewProps) {
             {route === 'recorded' ? (
               <>
                 <li><Lamp state={readyLed(setup.readiness.recorded_runtime)} /><span>Recorded runtime<small className="mono">{draft.mocap_ws || 'not set'}</small></span><strong>{readyWord(setup.readiness.recorded_runtime)}</strong></li>
+                {setup.readiness.recorded_runtime === false && setup.desktop_tools && (
+                  <li><span /><span>Install it with the K1 test tools in step 13.</span><button type="button" className="panel-key" onClick={() => selectStep('k1')}><Download aria-hidden="true" />Go to step 13</button></li>
+                )}
                 <li><Lamp state={readyLed(setup.readiness.motion_bvh)} /><span>Motion BVH<small className="mono">{draft.motion_bvh || 'not set'}</small></span><strong>{readyWord(setup.readiness.motion_bvh)}</strong></li>
                 <li><Lamp state={readyLed(setup.readiness.npose_bvh)} /><span>Neutral-pose BVH<small className="mono">{draft.npose_bvh || 'not set'}</small></span><strong>{readyWord(setup.readiness.npose_bvh)}</strong></li>
               </>
@@ -985,7 +1084,18 @@ export function SetupView({ client, initial, hidden = false }: SetupViewProps) {
             <span className="silk">Linux firewall</span>
             {setup.firewall_command ? (
               <>
-                <p>Only needed if UFW is active. Run in a terminal (needs your password):</p>
+                <p>{FIREWALL_NOTE[setup.firewall_state ?? 'unknown']}</p>
+                {setup.desktop_tools && (setup.firewall_state === 'active' || setup.firewall_state === 'unknown') && (
+                  <div className="setup-actions">
+                    <button type="button" className="panel-key is-primary" disabled={adminBusy !== null} onClick={() => void runAdmin('firewall')}>
+                      {adminBusy === 'firewall' ? <RefreshCw className="spin" aria-hidden="true" /> : <ShieldCheck aria-hidden="true" />}
+                      {adminBusy === 'firewall' ? 'Waiting for your password…' : 'Allow in firewall'}
+                    </button>
+                    <span className="group-note">Asks for your password, then adds the rule below.</span>
+                  </div>
+                )}
+                {adminResult?.action === 'firewall' && <AdminOutcome result={adminResult} />}
+                <p>Or run it in a terminal (needs your password):</p>
                 <div className="command-line">
                   <code className="mono">{setup.firewall_command}</code>
                   <CopyButton value={setup.firewall_command} label="firewall command" />
@@ -1042,7 +1152,7 @@ export function SetupView({ client, initial, hidden = false }: SetupViewProps) {
     const calibrate = Number(calibrateAfter)
     const calibrateInvalid = autoCalibrate && (!Number.isFinite(calibrate) || calibrate < 0.5 || calibrate > 60)
     const videos = setup.files.filter((file) => file.kind === 'video' && /-live/.test(file.name))
-    const liveJob = jobs.find((job) => job.kind === 'live')
+    const liveJob = jobs.find((job) => VIEWER_KINDS.includes(job.kind))
     const liveRunning = liveJob?.state === 'running'
     return (
       <>
@@ -1068,6 +1178,7 @@ export function SetupView({ client, initial, hidden = false }: SetupViewProps) {
           {calibrateInvalid && <span className="field-error" role="alert">Use 0.5 to 60 seconds.</span>}
           <div className="setup-actions">
             {runKey('live', 'live', 'Start live simulation', <Play aria-hidden="true" />, { calibrate_after_s: autoCalibrate ? calibrate : null, record_video: liveVideo }, true, calibrateInvalid || noDisplay)}
+            {setup.desktop_tools && runKey('live', 'compare', 'Start G1 + T1 side by side', <Columns2 aria-hidden="true" />, { calibrate_after_s: autoCalibrate ? calibrate : null }, false, calibrateInvalid || noDisplay)}
             {liveRunning && liveJob && (
               <button type="button" className="panel-key setup-run is-stop" disabled={isStopping(liveJob.id)} onClick={() => void stopJob(liveJob)}>
                 {isStopping(liveJob.id) ? <RefreshCw className="spin" aria-hidden="true" /> : <Square aria-hidden="true" />}{isStopping(liveJob.id) ? 'Stopping…' : 'Stop'}
@@ -1221,7 +1332,90 @@ export function SetupView({ client, initial, hidden = false }: SetupViewProps) {
             </table>
           ) : <div className="empty-state"><span>No files in the session folder yet.</span></div>}
         </fieldset>
+        {setup.desktop_tools && (
+          <fieldset className="group">
+            <legend className="silk">Shut down</legend>
+            {shutdownState === 'done' ? (
+              <p className="saved-note" role="status"><Lamp state="passed" /><span>The console is shutting down. To start it again, open <strong>Mocap Setup</strong> from the applications menu.</span></p>
+            ) : confirmShutdown ? (
+              <div className="setup-callout is-warning" role="alertdialog" aria-label="Shut down the console?">
+                <AlertTriangle aria-hidden="true" />
+                <div>
+                  <p>Shut down the Setup console? A running job{runningJob ? ` (${runningJob.label})` : ''} stops first. An open K1 test window stays open.</p>
+                  <div className="setup-actions">
+                    <button type="button" className="panel-key setup-run is-stop" disabled={shutdownState === 'sending'} onClick={() => void shutdownConsole()}>
+                      {shutdownState === 'sending' ? <RefreshCw className="spin" aria-hidden="true" /> : <Power aria-hidden="true" />}Shut down
+                    </button>
+                    <button type="button" className="panel-key" disabled={shutdownState === 'sending'} onClick={() => setConfirmShutdown(false)}>Cancel</button>
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <div className="setup-actions">
+                <button type="button" className="panel-key" onClick={() => setConfirmShutdown(true)}><Power aria-hidden="true" />Shut down the console</button>
+                <span className="group-note">Open it again from the applications menu: Mocap Setup.</span>
+              </div>
+            )}
+            {shutdownError && <ActionError message={shutdownError} />}
+          </fieldset>
+        )}
         <p className="group-note">Nothing here approves physical robot use. For the next take, click New session in {windows ? 'the Session step' : 'step 03'}.</p>
+      </>
+    )
+  }
+
+  function renderK1() {
+    const row = (state: boolean | null, label: string, detail: string, word?: string) => (
+      <li><Lamp state={readyLed(state)} /><span>{label}<small className="mono">{detail}</small></span><strong>{word ?? readyWord(state)}</strong></li>
+    )
+    const status = k1
+    const known = status?.available === true
+    const installJob = jobs.find((job) => job.kind === 'k1_install')
+    return (
+      <>
+        <fieldset className="group">
+          <legend className="silk">K1 test tools on this PC</legend>
+          {k1Error && <ActionError message={k1Error} />}
+          <ul className="chain readiness">
+            {row(known ? status.sdk_version !== null : null, 'Booster K1 SDK', known && status.sdk_version ? `version ${status.sdk_version}` : 'project .venv')}
+            {row(known ? status.tk : null, 'Tk (window toolkit)', 'python3-tk')}
+            {row(known ? status.runtime : null, 'GMR runtime', known ? status.runtime_dir : '~/mocap-runtime')}
+            {row(known ? status.model_found : null, 'K1 model', known ? status.model : 'K1_serial.xml')}
+            {row(known ? (status.window_open ? true : null) : null, 'K1 test window', known && status.window_open ? 'open, or an install is running' : 'not open', known && status.window_open ? 'OPEN' : 'CLOSED')}
+          </ul>
+          <div className="setup-actions">
+            {runKey('k1', 'k1_install', known && status.installed ? 'Reinstall K1 test tools' : 'Install K1 test tools', <Download aria-hidden="true" />, {}, !(known && status.installed), known && status.window_open)}
+            {known && !status.tk && (
+              <button type="button" className="panel-key" disabled={adminBusy !== null} onClick={() => void runAdmin('install_tk')}>
+                {adminBusy === 'install_tk' ? <RefreshCw className="spin" aria-hidden="true" /> : <Download aria-hidden="true" />}
+                {adminBusy === 'install_tk' ? 'Waiting for your password…' : 'Install Tk'}
+              </button>
+            )}
+            <button type="button" className="panel-key" onClick={() => void refreshK1()}><RefreshCw aria-hidden="true" />Check again</button>
+          </div>
+          <p className="group-note">{session ? `Installs the recorded runtime (with the K1 model) into ${shown(session.mocap_ws)} and the Booster SDK into the project, without sudo. Safe to run again.` : 'Save a session in step 03 first: the install uses its runtime folder.'}{known && status.window_open ? ' Close the K1 test window before you install.' : ''}</p>
+          {adminResult?.action === 'install_tk' && <AdminOutcome result={adminResult} copy="sudo apt-get install -y python3-tk" />}
+          {stepError}
+          {consoleFor(stepJob ?? installJob)}
+        </fieldset>
+        <fieldset className="group">
+          <legend className="silk">K1 test window</legend>
+          <p className="group-note">The twelve hardware-test steps, each from a button. It opens on this desktop as its own window. Shutting down this console leaves it, and its safety handling, running.</p>
+          <div className="setup-actions">
+            <button type="button" className="panel-key setup-run is-primary" disabled={k1Opening || (known && !status.display)} onClick={() => void openK1Window()}>
+              {k1Opening ? <RefreshCw className="spin" aria-hidden="true" /> : <Bot aria-hidden="true" />}Open K1 test window
+            </button>
+            <a className="panel-key" href={client.guideUrl('step-13')} target="_blank" rel="noreferrer"><BookOpen aria-hidden="true" />Open the guide</a>
+          </div>
+          {known && !status.display && displayNote}
+          {k1Result && (
+            <p className={k1Result.outcome === 'failed' ? 'setup-callout is-warning' : 'saved-note'} role="status">
+              {k1Result.outcome === 'failed' ? <AlertTriangle aria-hidden="true" /> : <Lamp state={k1Result.outcome === 'opened' ? 'passed' : 'next'} />}
+              <span>{k1Result.outcome === 'already_open' ? 'Already open, or an install is running. Look for the K1 window on this desktop.' : k1Result.message}</span>
+            </p>
+          )}
+          {known && status.log && <p className="group-note">Window log: <span className="mono">{status.log}</span></p>}
+        </fieldset>
       </>
     )
   }
@@ -1235,6 +1429,7 @@ export function SetupView({ client, initial, hidden = false }: SetupViewProps) {
     retarget: renderRetarget,
     render: renderRender,
     finish: renderFinish,
+    k1: renderK1,
   }
 
   return (
@@ -1288,6 +1483,26 @@ export function SetupView({ client, initial, hidden = false }: SetupViewProps) {
         {panels[step]()}
       </section>
     </main>
+  )
+}
+
+const FIREWALL_NOTE: Record<NonNullable<SetupState['firewall_state']>, string> = {
+  active: 'UFW is active on this PC: allow the Xsens stream through it.',
+  unknown: 'Only needed if UFW is active (this console cannot tell).',
+  inactive: 'UFW is off on this PC: no firewall change is needed.',
+  not_installed: 'UFW is not installed on this PC: no firewall change is needed.',
+}
+
+function AdminOutcome({ result, copy }: { result: { outcome: PrivilegedOutcome | 'error'; message: string }; copy?: string }) {
+  const ok = result.outcome === 'done'
+  return (
+    <div className={ok ? 'saved-note' : 'setup-callout is-warning'} role="status">
+      {ok ? <Lamp state="passed" /> : result.outcome === 'cancelled' ? <Lamp state="off" /> : <AlertTriangle aria-hidden="true" />}
+      <span>{result.message}</span>
+      {copy && result.outcome !== 'done' && result.outcome !== 'cancelled' && (
+        <span className="command-line"><code className="mono">{copy}</code><CopyButton value={copy} label="command" /></span>
+      )}
+    </div>
   )
 }
 

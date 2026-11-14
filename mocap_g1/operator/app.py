@@ -543,6 +543,7 @@ def create_app(
     try:
         from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
         from fastapi.responses import FileResponse, JSONResponse, Response
+        from starlette.background import BackgroundTask
         from fastapi.staticfiles import StaticFiles
     except ImportError as exc:  # pragma: no cover - environment dependent
         raise RuntimeError(
@@ -1023,6 +1024,48 @@ def create_app(
         require_same_origin(request.headers.get("origin"))
         await read_json_object(request, label="Stop request", allow_empty=False)
         return await asyncio.to_thread(workbench.stop_viewer)
+
+    @app.get("/api/v1/setup/k1")
+    async def get_setup_k1():
+        workbench = require_setup()
+        return await asyncio.to_thread(workbench.k1_status)
+
+    @app.post("/api/v1/setup/k1/open")
+    async def open_setup_k1(request: Request):
+        workbench = require_setup()
+        require_same_origin(request.headers.get("origin"))
+        await read_json_object(request, label="Open request", allow_empty=True)
+        return await asyncio.to_thread(workbench.open_k1_window)
+
+    @app.post("/api/v1/setup/privileged")
+    async def post_setup_privileged(request: Request):
+        # Waits (in a worker thread) until the desktop password prompt is answered.
+        workbench = require_setup()
+        require_same_origin(request.headers.get("origin"))
+        body = await read_json_object(request, label="Admin request", allow_empty=False)
+        return await asyncio.to_thread(workbench.run_privileged, body.get("action"))
+
+    @app.post("/api/v1/setup/shutdown", status_code=202)
+    async def post_setup_shutdown(request: Request):
+        workbench = require_setup()
+        require_same_origin(request.headers.get("origin"))
+        await read_json_object(request, label="Shutdown request", allow_empty=True)
+        accepted = workbench.request_shutdown()
+        # After the response is sent: Ctrl+C semantics, so the lifespan stops jobs first.
+        return JSONResponse(status_code=202, content=accepted,
+                            background=BackgroundTask(workbench.shutdown_console))
+
+    @app.get("/api/v1/setup/guide")
+    async def get_setup_guide():
+        workbench = require_setup()
+        guide = workbench.repo_root / "docs" / "engineer-setup.html"
+        if not guide.is_file():
+            raise HTTPException(status_code=404, detail="The setup guide is missing")
+        return FileResponse(
+            guide,
+            media_type="text/html",
+            headers={"Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff"},
+        )
 
     @app.get("/api/v1/setup/files/{name}")
     async def get_setup_file(name: str):

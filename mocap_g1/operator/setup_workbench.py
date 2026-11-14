@@ -41,6 +41,12 @@ import threading
 import time
 from typing import Any, Callable, Mapping
 
+try:  # POSIX only; the K1 test window and its lock do not exist on Windows
+    import fcntl
+except ImportError:  # pragma: no cover - Windows
+    fcntl = None  # type: ignore[assignment]
+import ipaddress
+
 from ..live_robots import LIVE_ROBOTS
 from ._version import service_version
 from .core import OperatorError
@@ -95,7 +101,8 @@ ROBOTS = ("booster_k1", "unitree_g1", "booster_t1_29dof")
 #: tool's arm abduction (no wrist, so no hand target to point the forearm).
 CONFIG_ARM_ROBOTS = ("booster_k1",)
 XSENS_UDP_PORT = "5555"
-JOB_KINDS = ("doctor", "acceptance", "live", "bvh_check", "retarget", "render", "save")
+JOB_KINDS = ("doctor", "acceptance", "live", "bvh_check", "retarget", "render", "save",
+             "compare", "k1_install")
 JOB_STATES = ("running", "passed", "failed", "stopped")
 #: Xsens Humanoid on the same Windows PC streams to (and from) this address.
 LOOPBACK_SOURCE = "127.0.0.1"
@@ -128,7 +135,24 @@ SESSION_DIR_LOCATION_MESSAGE = (
 )
 DEFAULT_STREAM_CHECK_S = 30
 #: Jobs that bind (or probe) the Xsens UDP port: the stream monitor releases it first.
-PORT_JOB_KINDS = ("doctor", "acceptance", "live")
+PORT_JOB_KINDS = ("doctor", "acceptance", "live", "compare")
+#: Jobs that bind the Xsens port and open the viewer in the ``gmr-xsens-live`` container.
+VIEWER_JOB_KINDS = ("live", "compare")
+#: Linux-only jobs (Docker comparison viewer, the K1 tools installer).
+LINUX_JOB_KINDS = ("compare", "k1_install")
+#: The K1 test window's single-instance lock; tools/setup/install.sh takes the same file.
+K1_LOCK_NAME = "k1-tests.lock"
+K1_LOG_NAME = "k1-tests.log"
+#: k1_commission_gui.py exits with this code when the lock is held.
+K1_ALREADY_OPEN_EXIT = 3
+#: The K1 window has this long to fail (lock held, Tk missing) before it counts as opened.
+K1_OPEN_WAIT_S = 1.0
+K1_MODEL = ("GMR", "assets", "booster_k1", "K1_serial.xml")
+PRIVILEGED_ACTIONS = ("firewall", "install_tk")
+#: pkexec exit codes: 126 = the user dismissed the password prompt.
+PKEXEC_CANCELLED = 126
+PRIVILEGED_TIMEOUT_S = 600
+UFW = "/usr/sbin/ufw"
 #: Commands a running Windows live simulation accepts on stdin (``--control-stdin``).
 CONTROL_COMMANDS = ("calibrate", "toggle_tracking", "rearm")
 #: The machine status line live_g1_sim.py prints: ``STATUS {json LiveStatus}``.
@@ -484,6 +508,132 @@ def default_udp_port_busy(port: int, bind: str = "0.0.0.0") -> bool:
     return False
 
 
+def default_user_state_dir(home: Path, environ: Mapping[str, str] | None = None) -> Path:
+    """``${XDG_STATE_HOME:-~/.local/state}/mocap-g1``: open_console.sh, install.sh and the K1 window use it."""
+
+    environ = os.environ if environ is None else environ
+    base = environ.get("XDG_STATE_HOME", "").strip()
+    return (Path(base) if base else home / ".local" / "state") / "mocap-g1"
+
+
+def default_firewall_state(conf: Path = Path("/etc/ufw/ufw.conf")) -> str:
+    """UFW's state read without privileges: ``active``, ``inactive``, ``not_installed`` or ``unknown``.
+
+    ``ufw status`` needs root, so this reads ENABLED= in ufw.conf and asks
+    systemd whether the ufw unit is up.  Anything unclear is ``unknown``
+    (never ``inactive``), so the console keeps offering the firewall button.
+    """
+
+    if not Path(UFW).exists():
+        return "not_installed"
+    try:
+        match = re.search(r"^\s*ENABLED\s*=\s*(\w+)", conf.read_text(encoding="utf-8"), re.M)
+    except OSError:
+        return "unknown"
+    if match is None:
+        return "unknown"
+    if match.group(1).lower() == "no":
+        return "inactive"
+    if match.group(1).lower() != "yes":
+        return "unknown"
+    try:
+        unit = subprocess.run(["systemctl", "is-active", "ufw"], capture_output=True, text=True,
+                              timeout=3, check=False).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return "unknown"
+    return "active" if unit == "active" else "unknown"
+
+
+def default_run_privileged(argv: list[str]) -> int:
+    """Run a fixed ``pkexec`` argv (the desktop's graphical password prompt); return its exit code.
+
+    127 when pkexec is missing; 124 when nobody answered in PRIVILEGED_TIMEOUT_S.
+    """
+
+    try:
+        return subprocess.run(argv, stdin=subprocess.DEVNULL, capture_output=True,
+                              timeout=PRIVILEGED_TIMEOUT_S, check=False).returncode
+    except subprocess.TimeoutExpired:
+        return 124
+    except OSError:
+        return 127
+
+
+def default_k1_lock_held(path: Path) -> bool:
+    """Whether someone (the K1 window, install.sh) holds the K1 lock; tries it without waiting."""
+
+    if fcntl is None or not path.exists():
+        return False
+    try:
+        with open(path, "a", encoding="utf-8") as handle:
+            try:
+                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                return True
+            fcntl.flock(handle, fcntl.LOCK_UN)
+    except OSError:
+        return False
+    return False
+
+
+def default_spawn_k1(argv: list[str], cwd: Path, env: Mapping[str, str], log_path: Path,
+                     wait_s: float) -> int | None:
+    """Start the K1 window in its own session; its exit code if it ended within ``wait_s``, else None.
+
+    The window must outlive the console (its safety handling keeps running when
+    Setup shuts down), so it is not a job and gets no process group of ours.
+    """
+
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(log_path, "ab") as log:
+        process = subprocess.Popen(argv, cwd=cwd, env=dict(env), stdin=subprocess.DEVNULL,
+                                   stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+    try:
+        return process.wait(timeout=wait_s)
+    except subprocess.TimeoutExpired:
+        return None
+
+
+_K1_PROBE = (
+    "import importlib.metadata as m, json\n"
+    "out = {'sdk_version': None, 'tk': False}\n"
+    "try:\n"
+    "    import booster_robotics_sdk_python\n"
+    "    out['sdk_version'] = m.version('booster_robotics_sdk_python')\n"
+    "except Exception:\n"
+    "    pass\n"
+    "try:\n"
+    "    import tkinter\n"
+    "    out['tk'] = True\n"
+    "except Exception:\n"
+    "    pass\n"
+    "print(json.dumps(out))\n"
+)
+
+
+def default_probe_k1(python: str) -> dict[str, Any]:
+    """Ask the project interpreter (the one the K1 window runs on) for the SDK version and Tk."""
+
+    found: dict[str, Any] = {"sdk_version": None, "tk": False}
+    try:
+        result = subprocess.run([python, "-c", _K1_PROBE], capture_output=True, text=True,
+                                timeout=20, check=False)
+        reported = json.loads(result.stdout.strip().splitlines()[-1])
+    except (OSError, subprocess.SubprocessError, ValueError, IndexError):
+        return found
+    if isinstance(reported, dict):
+        version = reported.get("sdk_version")
+        found["sdk_version"] = version if isinstance(version, str) and version else None
+        found["tk"] = reported.get("tk") is True
+    return found
+
+
+def default_shutdown_console() -> None:
+    """Stop this console as Ctrl+C does: uvicorn stops jobs (lifespan) and exits."""
+
+    os.kill(os.getpid(), signal.SIGINT)
+
+
 @dataclass
 class _Job:
     id: str
@@ -611,6 +761,13 @@ class SetupWorkbench:
         app_mode: bool | None = None,
         state_dir: str | Path | None = None,
         stream_monitor: StreamMonitor | None = None,
+        firewall_state: Callable[[], str] = default_firewall_state,
+        run_privileged: Callable[[list[str]], int] = default_run_privileged,
+        k1_lock_held: Callable[[Path], bool] = default_k1_lock_held,
+        spawn_k1: Callable[..., int | None] = default_spawn_k1,
+        probe_k1: Callable[[str], dict[str, Any]] = default_probe_k1,
+        shutdown_console: Callable[[], None] = default_shutdown_console,
+        user_state_dir: str | Path | None = None,
     ) -> None:
         self.repo_root = Path(repo_root).expanduser().resolve()
         if not (self.repo_root / "tools" / "xsens" / "live_operator.sh").is_file():
@@ -654,6 +811,17 @@ class SetupWorkbench:
             stream_monitor = StreamMonitor()
         self._monitor = stream_monitor
         self._monitor_started = False
+        self._firewall_state = firewall_state
+        self._run_privileged = run_privileged
+        self._k1_lock_held = k1_lock_held
+        self._spawn_k1 = spawn_k1
+        self._probe_k1 = probe_k1
+        self._shutdown_console = shutdown_console
+        #: ``${XDG_STATE_HOME:-~/.local/state}/mocap-g1``: console log, K1 lock and K1 log.
+        self.user_state_dir = (Path(user_state_dir) if user_state_dir is not None
+                               else default_user_state_dir(self.home))
+        # One password prompt at a time (firewall or Tk).
+        self._privileged_lock = threading.Lock()
 
     # ------------------------------------------------------------------ paths
 
@@ -1123,6 +1291,10 @@ class SetupWorkbench:
                 "detected_linux_ip": detected,
             },
             "firewall_command": firewall,
+            # Linux only: UFW read without privileges; drives the Allow in firewall button.
+            "firewall_state": None if self.windows else self._firewall_state(),
+            # Linux checkout console only: step 13 (real K1) and Shut down the console.
+            "desktop_tools": not self.windows and not self.app_mode,
             "stream_check_s": stream_check_seconds(),
             "readiness": {
                 "live_image": None,
@@ -1329,6 +1501,14 @@ class SetupWorkbench:
                 raise bad(f"{name} must be one of: {', '.join(allowed)}")
             return value
 
+        if kind == "compare":
+            calibrate = options.get("calibrate_after_s")
+            if calibrate is not None:
+                if isinstance(calibrate, bool) or not isinstance(calibrate, (int, float)):
+                    raise bad("calibrate_after_s must be a number of seconds or null")
+                if not (math.isfinite(calibrate) and 0.5 <= calibrate <= 60):
+                    raise bad("calibrate_after_s must be 0.5–60 s")
+            return {"calibrate_after_s": calibrate}
         if kind == "live":
             # Omitted options take the saved app preferences (defaults: no video, no timer).
             prefs = self.prefs()
@@ -1360,6 +1540,9 @@ class SetupWorkbench:
             options = {}
         if not isinstance(options, Mapping):
             raise SetupError("options must be an object", code="invalid_options", status_code=422)
+        if kind in LINUX_JOB_KINDS and (self.windows or self.app_mode):
+            raise SetupError("This step is only available on the Ubuntu PC",
+                             code="not_supported", status_code=409)
         options = self._validate_options(kind, options)
         raw = self.read_session_raw()
         if raw is None or not raw.get("SESSION_DIR"):
@@ -1368,7 +1551,7 @@ class SetupWorkbench:
         # session.env may have been edited by hand: outputs must stay in an allowed folder.
         if not self._session_dir_allowed(session["session_dir"]):
             raise SetupError(SESSION_DIR_LOCATION_MESSAGE, code="invalid_session_dir")
-        if kind in ("acceptance", "live") and not session["windows_xsens_ip"]:
+        if kind in ("acceptance", "live", "compare") and not session["windows_xsens_ip"]:
             raise SetupError(
                 "Choose where Xsens runs (this PC or its IP) in the session first"
                 if self.windows else "Enter the Windows Xsens IP in the session first",
@@ -1393,10 +1576,16 @@ class SetupWorkbench:
                 "an N-pose motion would leave its forearms free. Use Make preview motion.",
                 code="npose_not_supported",
             )
-        if kind in ("live", "render") and not self._display_available():
+        if kind in ("live", "render", "compare") and not self._display_available():
             raise SetupError(NO_DISPLAY_HINT, code="no_display")
+        if kind == "k1_install" and self._k1_lock_held(self.k1_lock_path):
+            raise SetupError(
+                "Close the K1 test window first: the installer changes the Python "
+                "environment it runs on.",
+                code="k1_window_open",
+            )
         self._require_no_running_job()
-        if kind in ("acceptance", "live"):
+        if kind in ("acceptance", "live", "compare"):
             # Only after the running-job check: our own job would hold these.
             if self._viewer_running():
                 raise SetupError(
@@ -1409,7 +1598,7 @@ class SetupWorkbench:
             # the job thread takes it back when the job ends.
             self._release_port()
         try:
-            if kind in ("acceptance", "live"):
+            if kind in ("acceptance", "live", "compare"):
                 port = int(raw.get("XSENS_UDP_PORT") or XSENS_UDP_PORT)
                 if self._port_busy(port, self._udp_bind(session)):
                     raise SetupError(
@@ -1471,9 +1660,9 @@ class SetupWorkbench:
         """Stop a leftover live viewer container (``docker stop gmr-xsens-live``)."""
 
         running = self.running_job()
-        if running is not None and running.kind == "live":
+        if running is not None and running.kind in VIEWER_JOB_KINDS:
             raise SetupError(
-                "The live simulation is running from this console; use its Stop button",
+                f"{running.label} is running from this console; use its Stop button",
                 code="job_running",
                 job_id=running.id,
             )
@@ -1530,6 +1719,8 @@ class SetupWorkbench:
             "doctor": "System check",
             "acceptance": "Stream check",
             "live": "Live simulation",
+            "compare": "G1 + T1 side by side",
+            "k1_install": "Install K1 test tools",
             "bvh_check": "Check BVH files",
             "save": "Save report",
         }[kind]
@@ -1819,6 +2010,51 @@ class SetupWorkbench:
                 job.append("No new live video was recorded")
         return code, code == 0
 
+    def compare_argv(self, session: Mapping[str, Any], options: Mapping[str, Any]) -> list[str]:
+        """G1 and T1 side by side: docker/gmr-live/run-compare.sh (container gmr-xsens-live)."""
+
+        argv = [str(self.repo_root / "docker" / "gmr-live" / "run-compare.sh"),
+                "--human-height", _format_number(session["human_height_m"])]
+        if options["calibrate_after_s"] is not None:
+            argv += ["--calibrate-after", _format_number(options["calibrate_after_s"])]
+        return argv
+
+    def _run_compare(self, job, session, raw, options) -> tuple[int, bool]:
+        env = self._session_env(raw)
+        env["XSENS_SOURCE_IP"] = session["windows_xsens_ip"]
+        code = self._run_process(
+            job, self._argv("compare", session, options, lambda: self.compare_argv(session, options)),
+            env,
+        )
+        return code, code == 0
+
+    def k1_install_argv(self, session: Mapping[str, Any]) -> list[str]:
+        """The recorded runtime (with the K1 model) and the Booster SDK, without sudo."""
+
+        return ["bash", str(self.repo_root / "tools" / "setup" / "install.sh"), "recorded",
+                "--with-booster", "--workspace", session["mocap_ws"], "--robot", "booster_k1"]
+
+    def _run_k1_install(self, job, session, raw, options) -> tuple[int, bool]:
+        # The installer's own environment: no session values, no console interpreter first on PATH.
+        env = {**os.environ, "PYTHONUNBUFFERED": "1"}
+        code = self._run_process(
+            job, self._argv("k1_install", session, options, lambda: self.k1_install_argv(session)),
+            env,
+        )
+        if job.stop_requested:
+            return code, False
+        if code != 0:
+            job.append(f"FAIL: the K1 test tools did not install (exit {code}). Fix the error "
+                       "above, then click Install K1 test tools again; finished parts are skipped.")
+            return code, False
+        shortcut = self._run_process(
+            job, ["bash", str(self.repo_root / "tools" / "setup" / "open_console.sh"),
+                  "--install-shortcut"], env)
+        job.append("PASS: K1 test tools installed"
+                   + ("; menu entries updated" if shortcut == 0
+                      else "; the menu entries could not be updated"))
+        return 0, True
+
     def _run_bvh_check(self, job, session, raw, options) -> tuple[int, bool]:
         if "bvh_check" in self.command_overrides:
             code = self._run_process(job, self._argv("bvh_check", session, options, list),
@@ -2073,7 +2309,7 @@ class SetupWorkbench:
         signal_group(signal.SIGINT)
         if exited(self.stop_grace_s):
             return
-        if job.kind == "live":
+        if job.kind in VIEWER_JOB_KINDS:
             self._stop_container()
             if exited(self.stop_grace_s):
                 return
@@ -2126,6 +2362,162 @@ class SetupWorkbench:
         except OSError:
             pass
         exited(self.stop_grace_s)
+
+    # ------------------------------------------- K1 tools, password prompts, shutdown
+
+    @property
+    def k1_lock_path(self) -> Path:
+        return self.user_state_dir / K1_LOCK_NAME
+
+    @property
+    def k1_log_path(self) -> Path:
+        return self.user_state_dir / K1_LOG_NAME
+
+    def _require_desktop_tools(self) -> None:
+        if self.windows or self.app_mode:
+            raise SetupError("Only available in the Setup console on the Ubuntu PC",
+                             code="not_supported")
+
+    def _session_or_defaults(self) -> dict[str, Any]:
+        raw = self.read_session_raw()
+        if raw is not None and raw.get("SESSION_DIR"):
+            return self._values_from_env(raw)
+        return self.builtin_defaults()
+
+    def k1_status(self) -> dict[str, Any]:
+        """GET /api/v1/setup/k1: whether the K1 test tools are installed and the window is open.
+
+        The SDK and Tk are checked with the project interpreter (the K1 window's);
+        GMR and the K1 model in the session's runtime folder (default ~/mocap-runtime).
+        """
+
+        if self.windows or self.app_mode:
+            return {"available": False}
+        mocap_ws = self._session_or_defaults()["mocap_ws"]
+        python = self.repo_root / ".venv" / "bin" / "python"
+        probe = self._probe_k1(str(python)) if python.exists() else {"sdk_version": None, "tk": False}
+        model = Path(mocap_ws).joinpath(*K1_MODEL)
+        runtime = self._runtime_ready(mocap_ws)
+        model_found = model.is_file()
+        sdk = probe.get("sdk_version")
+        tk = probe.get("tk") is True
+        return {
+            "available": True,
+            "sdk_version": sdk if isinstance(sdk, str) else None,
+            "tk": tk,
+            "runtime": runtime,
+            "runtime_dir": self._tilde(mocap_ws),
+            "model": self._tilde(str(model)),
+            "model_found": model_found,
+            "installed": bool(sdk) and tk and runtime and model_found,
+            "window_open": bool(self._k1_lock_held(self.k1_lock_path)),
+            "display": bool(self._display_available()),
+            "log": self._tilde(str(self.k1_log_path)),
+        }
+
+    def open_k1_window(self) -> dict[str, Any]:
+        """Start tools/control/k1_commission_gui.py detached on this desktop.
+
+        The window takes the K1 lock itself; when the lock is held it exits 3
+        and this reports ``already_open`` (a window is open, or an install runs).
+        """
+
+        self._require_desktop_tools()
+        if not self._display_available():
+            raise SetupError(NO_DISPLAY_HINT, code="no_display")
+        python = self.repo_root / ".venv" / "bin" / "python"
+        gui = self.repo_root / "tools" / "control" / "k1_commission_gui.py"
+        if not python.exists() or not gui.is_file():
+            raise SetupError("The K1 test tools are not installed: click Install K1 test tools",
+                             code="k1_not_installed")
+        try:
+            code = self._spawn_k1([str(python), str(gui)], self.repo_root, dict(os.environ),
+                                  self.k1_log_path, K1_OPEN_WAIT_S)
+        except OSError as exc:
+            return {"outcome": "failed", "message": f"The K1 test window could not start: {exc}"}
+        if code is None:
+            return {"outcome": "opened", "message": "The K1 test window is open on this desktop."}
+        if code == K1_ALREADY_OPEN_EXIT:
+            return {"outcome": "already_open",
+                    "message": "The K1 test window is already open, or an install is running."}
+        return {"outcome": "failed",
+                "message": f"The K1 test window closed at once (exit {code}). "
+                           f"See {self._tilde(str(self.k1_log_path))}."}
+
+    def privileged_argv(self, action: str) -> list[str]:
+        """The fixed pkexec argv for ``action``; IPs come from the saved session, validated."""
+
+        if action == "install_tk":
+            return ["pkexec", "/usr/bin/apt-get", "install", "-y", "python3-tk"]
+        if action != "firewall":
+            raise SetupError(f"action must be one of: {', '.join(PRIVILEGED_ACTIONS)}",
+                             code="invalid_action", status_code=422, field="action")
+        session = self.current_session()
+        addresses = []
+        for name in ("windows_xsens_ip", "linux_xsens_ip"):
+            value = session.get(name, "") if session else ""
+            try:
+                address = ipaddress.IPv4Address(value)
+            except ValueError:
+                raise SetupError("Save both IP addresses in step 03 first",
+                                 code="no_firewall_rule") from None
+            if address.is_loopback or address.is_unspecified or address.is_multicast:
+                raise SetupError("Both IP addresses must be real network addresses",
+                                 code="no_firewall_rule")
+            addresses.append(str(address))
+        return ["pkexec", UFW, "allow", "from", addresses[0], "to", addresses[1],
+                "port", XSENS_UDP_PORT, "proto", "udp"]
+
+    def run_privileged(self, action: Any) -> dict[str, Any]:
+        """Run one fixed admin command behind the desktop password prompt (pkexec).
+
+        Blocks until the prompt is answered (the API calls it in a worker
+        thread).  Outcomes: ``done`` (exit 0), ``cancelled`` (126, the prompt was
+        dismissed) or ``unavailable`` (no agent, not authorised, or the command
+        failed): the UI then keeps the Copy fallback for a terminal.
+        """
+
+        self._require_desktop_tools()
+        if not isinstance(action, str):
+            raise SetupError(f"action must be one of: {', '.join(PRIVILEGED_ACTIONS)}",
+                             code="invalid_action", status_code=422, field="action")
+        argv = self.privileged_argv(action)
+        if not self._display_available():
+            raise SetupError("No desktop display for the password prompt. Use Copy and a terminal.",
+                             code="no_display")
+        if not self._privileged_lock.acquire(blocking=False):
+            raise SetupError("A password prompt is already open", code="prompt_open")
+        try:
+            code = self._run_privileged(argv)
+        finally:
+            self._privileged_lock.release()
+        what = "Firewall rule added" if action == "firewall" else "Tk installed"
+        if code == 0:
+            return {"action": action, "outcome": "done", "exit_code": 0, "message": what + "."}
+        if code == PKEXEC_CANCELLED:
+            return {"action": action, "outcome": "cancelled", "exit_code": code,
+                    "message": "Cancelled: nothing was changed."}
+        return {"action": action, "outcome": "unavailable", "exit_code": code,
+                "message": f"Could not ask for your password, or the command failed (exit {code}). "
+                           "Use Copy and run the command in a terminal."}
+
+    def request_shutdown(self) -> dict[str, Any]:
+        """Shut down this console: running jobs stop first (lifespan), the K1 window stays open."""
+
+        self._require_desktop_tools()
+        return {"shutting_down": True}
+
+    def shutdown_console(self) -> None:
+        """Called by the API after the shutdown response has been sent."""
+
+        pid_file = self.user_state_dir / "setup-console.pid"
+        try:
+            # open_console.sh's pid file, only when it names this process.
+            if pid_file.read_text(encoding="utf-8").strip() == str(os.getpid()):
+                pid_file.unlink()
+        except OSError:
+            pass
+        self._shutdown_console()
 
     def shutdown(self) -> None:
         """Stop any running job and the stream monitor; called on console shutdown."""

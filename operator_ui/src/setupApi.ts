@@ -22,7 +22,35 @@ export function asSetupRobot(value: unknown): SetupRobot {
   return typeof value === 'string' && (SETUP_ROBOTS as readonly string[]).includes(value) ? value as SetupRobot : 'booster_k1'
 }
 export type JobState = 'running' | 'passed' | 'failed' | 'stopped'
-export type JobKind = 'doctor' | 'acceptance' | 'live' | 'bvh_check' | 'retarget' | 'render' | 'save'
+export type JobKind = 'doctor' | 'acceptance' | 'live' | 'bvh_check' | 'retarget' | 'render' | 'save' | 'compare' | 'k1_install'
+/** UFW as the console reads it without privileges; ``unknown`` never means off. */
+export type FirewallState = 'active' | 'inactive' | 'not_installed' | 'unknown'
+export type PrivilegedAction = 'firewall' | 'install_tk'
+
+/** ``GET /api/v1/setup/k1``: the K1 test tools on this PC (Linux checkout console only). */
+export interface K1Status {
+  available: boolean
+  sdk_version: string | null
+  tk: boolean
+  runtime: boolean
+  runtime_dir: string
+  model: string
+  model_found: boolean
+  installed: boolean
+  /** The K1 lock is held: a K1 test window is open, or an install is running. */
+  window_open: boolean
+  display: boolean
+  log: string
+}
+
+export type K1OpenOutcome = 'opened' | 'already_open' | 'failed'
+/** done (exit 0), cancelled (prompt dismissed) or unavailable (no prompt, or the command failed). */
+export type PrivilegedOutcome = 'done' | 'cancelled' | 'unavailable'
+
+export interface ActionResult<T extends string> {
+  outcome: T
+  message: string
+}
 
 export interface SessionValues {
   route: SetupRoute
@@ -145,6 +173,10 @@ export interface SetupState {
   defaults: SessionValues
   network: { interfaces: NetworkInterface[]; detected_linux_ip: string | null }
   firewall_command: string | null
+  /** ``null`` on Windows. */
+  firewall_state: FirewallState | null
+  /** Linux checkout console: the Real K1 step, Allow in firewall and Shut down. */
+  desktop_tools: boolean
   readiness: SetupReadiness
   files: SetupFile[]
   jobs: JobSummary[]
@@ -220,6 +252,12 @@ export const SESSION_FIELDS: readonly SessionField[] = [
   'offsets_file', 'bvh_scale', 'start_frame', 'end_frame', 'frame_step', 'npose_start_s',
   'npose_duration_s', 'windows_xsens_ip', 'linux_xsens_ip',
 ]
+
+const FIREWALL_STATES: ReadonlySet<string> = new Set<FirewallState>(['active', 'inactive', 'not_installed', 'unknown'])
+const K1_OUTCOMES: ReadonlySet<string> = new Set<K1OpenOutcome>(['opened', 'already_open', 'failed'])
+const PRIVILEGED_OUTCOMES: ReadonlySet<string> = new Set<PrivilegedOutcome>(['done', 'cancelled', 'unavailable'])
+/** The console waits up to 10 minutes for the password prompt (PRIVILEGED_TIMEOUT_S). */
+const PRIVILEGED_TIMEOUT_MS = 630_000
 
 const JOB_STATES: ReadonlySet<string> = new Set<JobState>(['running', 'passed', 'failed', 'stopped'])
 
@@ -389,6 +427,8 @@ export function parseSetupState(value: unknown): SetupState {
       detected_linux_ip: typeof network.detected_linux_ip === 'string' && network.detected_linux_ip ? network.detected_linux_ip : null,
     },
     firewall_command: typeof value.firewall_command === 'string' && value.firewall_command.trim() ? value.firewall_command : null,
+    firewall_state: typeof value.firewall_state === 'string' && FIREWALL_STATES.has(value.firewall_state) ? value.firewall_state as FirewallState : null,
+    desktop_tools: value.desktop_tools === true,
     readiness: {
       live_image: boolOrNull(readiness.live_image),
       live_runtime: boolOrNull(readiness.live_runtime),
@@ -401,6 +441,32 @@ export function parseSetupState(value: unknown): SetupState {
     files: list(value.files, parseFile),
     jobs: list(value.jobs, parseJobSummary),
     stream_check_s: typeof value.stream_check_s === 'number' && Number.isFinite(value.stream_check_s) && value.stream_check_s > 0 ? value.stream_check_s : 30,
+  }
+}
+
+/** Missing or malformed fields read as not installed / not open. */
+export function parseK1Status(value: unknown): K1Status {
+  const record = isRecord(value) ? value : {}
+  return {
+    available: record.available === true,
+    sdk_version: typeof record.sdk_version === 'string' && record.sdk_version ? record.sdk_version : null,
+    tk: record.tk === true,
+    runtime: record.runtime === true,
+    runtime_dir: str(record.runtime_dir),
+    model: str(record.model),
+    model_found: record.model_found === true,
+    installed: record.installed === true,
+    window_open: record.window_open === true,
+    display: record.display === true,
+    log: str(record.log),
+  }
+}
+
+function parseResult<T extends string>(value: unknown, allowed: ReadonlySet<string>, fallback: T): ActionResult<T> {
+  const record = isRecord(value) ? value : {}
+  return {
+    outcome: typeof record.outcome === 'string' && allowed.has(record.outcome) ? record.outcome as T : fallback,
+    message: str(record.message),
   }
 }
 
@@ -537,6 +603,31 @@ export class SetupClient {
       lines.push(...log.lines)
     }
     return { job: log.job, lines, next: log.next }
+  }
+
+  async getK1(): Promise<K1Status> {
+    return parseK1Status(await json(await setupRequest('/k1', { timeoutMs: 30000 })))
+  }
+
+  /** Start the K1 test window on this desktop (the console waits about 1 s for it). */
+  async openK1(): Promise<ActionResult<K1OpenOutcome>> {
+    const response = await setupRequest('/k1/open', { method: 'POST', body: '{}', timeoutMs: 15000 })
+    return parseResult(await json(response), K1_OUTCOMES, 'failed')
+  }
+
+  /** One fixed admin command behind the desktop password prompt; resolves when it is answered. */
+  async runPrivileged(action: PrivilegedAction): Promise<ActionResult<PrivilegedOutcome>> {
+    const response = await setupRequest('/privileged', { method: 'POST', body: JSON.stringify({ action }), timeoutMs: PRIVILEGED_TIMEOUT_MS })
+    return parseResult(await json(response), PRIVILEGED_OUTCOMES, 'unavailable')
+  }
+
+  /** Stop running jobs and exit the console (202). */
+  async shutdown(): Promise<void> {
+    await json(await setupRequest('/shutdown', { method: 'POST', body: '{}', timeoutMs: 15000 }))
+  }
+
+  guideUrl(section = ''): string {
+    return `${SETUP_API}/guide${section ? `#${section}` : ''}`
   }
 
   fileUrl(name: string): string {

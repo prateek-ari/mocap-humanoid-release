@@ -11,7 +11,11 @@ import {
   type JobKind,
   type JobLog,
   type JobOptions,
+  type ActionResult,
   type JobSummary,
+  type K1OpenOutcome,
+  type K1Status,
+  type PrivilegedOutcome,
   type SessionValues,
   type SetupState,
 } from './setupApi'
@@ -111,6 +115,22 @@ class FakeSetupClient extends SetupClient {
   readonly stops = vi.fn<(id: string) => Promise<JobSummary>>(() => Promise.resolve(runningJob))
   override stopJob(id: string) { return this.stops(id) }
   override stopViewer() { return this.viewerStops() }
+  readonly k1Reads = vi.fn((): Promise<K1Status> => Promise.resolve(k1Status()))
+  readonly k1Opens = vi.fn<() => Promise<ActionResult<K1OpenOutcome>>>(() => Promise.resolve({ outcome: 'opened', message: 'The K1 test window is open on this desktop.' }))
+  readonly admins = vi.fn<(action: string) => Promise<ActionResult<PrivilegedOutcome>>>(() => Promise.resolve({ outcome: 'done', message: 'Firewall rule added.' }))
+  readonly shutdowns = vi.fn(() => Promise.resolve())
+  override getK1() { return this.k1Reads() }
+  override openK1() { return this.k1Opens() }
+  override runPrivileged(action: 'firewall' | 'install_tk') { return this.admins(action) }
+  override shutdown() { return this.shutdowns() }
+}
+
+function k1Status(overrides: Partial<K1Status> = {}): K1Status {
+  return {
+    available: true, sdk_version: '1.6.3', tk: true, runtime: true, runtime_dir: '~/mocap-runtime',
+    model: '~/mocap-runtime/GMR/assets/booster_k1/K1_serial.xml', model_found: true, installed: true,
+    window_open: false, display: true, log: '~/.local/state/mocap-g1/k1-tests.log', ...overrides,
+  }
 }
 
 async function flush() {
@@ -641,5 +661,124 @@ describe('Setup on Windows', () => {
     await renderApp(setup)
     expect(screen.getByText('No desktop display: viewer windows cannot open.')).toBeTruthy()
     expect(document.body.textContent).not.toMatch(/SSH/)
+  })
+})
+
+describe('Setup desktop tools (Linux checkout console)', () => {
+  const desktop = (overrides: Partial<SetupState> = {}) => makeSetup({ session: values, desktop_tools: true, firewall_state: 'active', ...overrides })
+
+  function goTo(step: string) {
+    window.history.replaceState(null, '', `#setup/${step}`)
+    act(() => { window.dispatchEvent(new HashChangeEvent('hashchange')) })
+  }
+
+  it('adds step 13 only on the desktop console', async () => {
+    await renderApp(desktop())
+    const steps = [...document.querySelectorAll('.setup-stepper li')].map((item) => item.getAttribute('data-step'))
+    expect(steps).toEqual(['session', 'windows', 'stream', 'live', 'finish', 'k1'])
+    // Optional: never marked as the next step.
+    expect(document.querySelector('[data-step="k1"]')?.textContent).not.toContain('Next')
+    cleanup()
+    await renderApp(makeSetup({ session: values }))
+    expect(document.querySelector('.setup-stepper li[data-step="k1"]')).toBeNull()
+  })
+
+  it('shows the K1 tools and opens the K1 test window', async () => {
+    const setupClient = await renderApp(desktop())
+    goTo('k1')
+    await flush()
+    expect(setupClient.k1Reads).toHaveBeenCalled()
+    expect(screen.getByText('version 1.6.3')).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Reinstall K1 test tools' })).toBeTruthy()
+    expect(screen.queryByRole('button', { name: 'Install Tk' })).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: 'Open K1 test window' }))
+    await flush()
+    expect(setupClient.k1Opens).toHaveBeenCalledTimes(1)
+    expect(screen.getByText('The K1 test window is open on this desktop.')).toBeTruthy()
+
+    setupClient.k1Opens.mockResolvedValueOnce({ outcome: 'already_open', message: '' })
+    fireEvent.click(screen.getByRole('button', { name: 'Open K1 test window' }))
+    await flush()
+    expect(screen.getByText('Already open, or an install is running. Look for the K1 window on this desktop.')).toBeTruthy()
+    expect(screen.getByRole('link', { name: 'Open the guide' }).getAttribute('href')).toBe('/api/v1/setup/guide#step-13')
+  })
+
+  it('installs the K1 tools as a job, locks it while the window is open, and offers Install Tk', async () => {
+    const setupClient = await renderApp(desktop())
+    setupClient.k1Reads.mockResolvedValue(k1Status({ tk: false, installed: false, window_open: true }))
+    goTo('k1')
+    await flush()
+    expect(screen.getByRole('button', { name: 'Install K1 test tools' })).toHaveProperty('disabled', true)
+    expect(screen.getByText(/Close the K1 test window before you install/)).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Install Tk' }))
+    await flush()
+    expect(setupClient.admins).toHaveBeenCalledWith('install_tk')
+
+    setupClient.k1Reads.mockResolvedValue(k1Status({ installed: false, runtime: false }))
+    fireEvent.click(screen.getByRole('button', { name: 'Check again' }))
+    await flush()
+    fireEvent.click(screen.getByRole('button', { name: 'Install K1 test tools' }))
+    await flush()
+    expect(setupClient.starts).toHaveBeenCalledWith('k1_install', {})
+  })
+
+  it('allows the stream in the firewall and reports each outcome', async () => {
+    const setupClient = await renderApp(desktop())
+    goTo('windows')
+    expect(screen.getByText('UFW is active on this PC: allow the Xsens stream through it.')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Allow in firewall' }))
+    await flush()
+    expect(setupClient.admins).toHaveBeenCalledWith('firewall')
+    expect(screen.getByText('Firewall rule added.')).toBeTruthy()
+
+    setupClient.admins.mockResolvedValueOnce({ outcome: 'cancelled', message: 'Cancelled: nothing was changed.' })
+    fireEvent.click(screen.getByRole('button', { name: 'Allow in firewall' }))
+    await flush()
+    expect(screen.getByText('Cancelled: nothing was changed.')).toBeTruthy()
+    // The Copy fallback stays.
+    expect(screen.getByRole('button', { name: 'Copy firewall command' })).toBeTruthy()
+  })
+
+  it('hides Allow in firewall when UFW is off, and keeps it when the state is unknown', async () => {
+    await renderApp(desktop({ firewall_state: 'inactive' }))
+    goTo('windows')
+    expect(screen.queryByRole('button', { name: 'Allow in firewall' })).toBeNull()
+    expect(screen.getByText('UFW is off on this PC: no firewall change is needed.')).toBeTruthy()
+    cleanup()
+    await renderApp(desktop({ firewall_state: 'unknown' }))
+    goTo('windows')
+    expect(screen.getByRole('button', { name: 'Allow in firewall' })).toBeTruthy()
+  })
+
+  it('starts G1 + T1 side by side with the auto-calibrate value', async () => {
+    const setupClient = await renderApp(desktop())
+    goTo('live')
+    fireEvent.click(screen.getByRole('checkbox', { name: /Auto-calibrate after/ }))
+    fireEvent.click(screen.getByRole('button', { name: 'Start G1 + T1 side by side' }))
+    await flush()
+    expect(setupClient.starts).toHaveBeenCalledWith('compare', { calibrate_after_s: 5 })
+  })
+
+  it('points a missing recorded runtime at step 13', async () => {
+    const setupClient = await renderApp(desktop({ session: { ...values, route: 'recorded' } }))
+    setupClient.starts.mockRejectedValueOnce(new SetupApiError('Recorded runtime not found', 409, 'recorded_runtime_missing'))
+    goTo('retarget')
+    fireEvent.click(screen.getByRole('button', { name: 'Make preview' }))
+    await flush()
+    fireEvent.click(screen.getByRole('button', { name: 'Install it in step 13 · Real K1' }))
+    expect(panel()?.getAttribute('data-step')).toBe('k1')
+  })
+
+  it('shuts down the console after a confirmation', async () => {
+    const setupClient = await renderApp(desktop())
+    goTo('finish')
+    fireEvent.click(screen.getByRole('button', { name: 'Shut down the console' }))
+    expect(setupClient.shutdowns).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Shut down the console' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Shut down' }))
+    await flush()
+    expect(setupClient.shutdowns).toHaveBeenCalledTimes(1)
+    expect(screen.getByText(/The console is shutting down/)).toBeTruthy()
   })
 })
