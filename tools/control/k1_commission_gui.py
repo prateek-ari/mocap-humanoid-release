@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import datetime as dt
+import ipaddress
 import json
 import os
 from pathlib import Path
@@ -322,6 +323,164 @@ def acceptance_record(path: Path) -> Path | None:
     return record if record.is_file() else None
 
 
+def lock_path() -> Path:
+    state = Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local" / "state")
+    return state / "mocap-g1" / "k1-tests.lock"
+
+
+def take_instance_lock(path: Path | None = None) -> Any:
+    """The open lock file while this window runs, or None when the window is already open or
+    tools/setup/install.sh is running (it holds the same lock while it changes .venv)."""
+    import fcntl
+
+    path = path or lock_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle = path.open("a")
+    try:
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        handle.close()
+        return None
+    return handle
+
+
+def default_model() -> str:
+    try:
+        from tools.control.k1_arm_bridge import resolve_model
+        found = resolve_model(None)
+    except Exception:  # noqa: BLE001 - only a default for a field
+        found = None
+    fallback = Path.home() / "mocap-runtime" / "GMR" / "assets" / "booster_k1" / "K1_serial.xml"
+    return str(found) if found else str(fallback) if fallback.is_file() else ""
+
+
+def interface_choices() -> list[str]:
+    """``"<address> (<interface>)"`` for each IPv4 address of this PC."""
+    from tools.control.k1_commission import local_addresses
+
+    return [f"{address} ({name})" for name, address in local_addresses() if name != "lo"]
+
+
+def net_value(choice: str) -> str:
+    """The ``--net`` value from a dropdown entry or a typed address or interface."""
+    return choice.strip().split(" ", 1)[0] if choice.strip() else ""
+
+
+def robot_network(robot_ip: str) -> ipaddress.IPv4Network | ipaddress.IPv6Network:
+    return ipaddress.ip_network(f"{robot_ip.strip()}/24", strict=False)  # ValueError if invalid
+
+
+def on_robot_network(choices: list[str], robot_ip: str) -> list[str]:
+    try:
+        network = robot_network(robot_ip)
+    except ValueError:
+        return []
+    found = []
+    for choice in choices:
+        try:
+            if ipaddress.ip_address(net_value(choice)) in network:
+                found.append(choice)
+        except ValueError:
+            continue
+    return found
+
+
+def firewall_state(run: Any = subprocess.run, conf: Path = Path("/etc/ufw/ufw.conf")) -> str:
+    """``active``, ``inactive`` or ``unknown``, read without root (``ufw status`` needs root)."""
+    try:
+        unit = run(["systemctl", "is-active", "ufw"], capture_output=True, text=True,
+                   check=False).stdout.strip()
+    except OSError:
+        unit = ""
+    try:
+        text = conf.read_text(encoding="utf-8")
+        enabled: bool | None = any(line.strip().lower() == "enabled=yes"
+                                   for line in text.splitlines())
+    except OSError:
+        enabled = None
+    if unit == "active" and enabled:
+        return "active"
+    if enabled is False or not conf.parent.exists():  # switched off, or ufw not installed
+        return "inactive"
+    return "unknown"
+
+
+def firewall_command(robot_ip: str) -> list[str]:
+    return ["pkexec", "/usr/sbin/ufw", "allow", "from", str(robot_network(robot_ip))]
+
+
+def run_privileged(argv: list[str], run: Any = subprocess.run) -> tuple[str, str]:
+    """``(outcome, text)``: outcome ``done``, ``cancelled`` or ``failed``."""
+    try:
+        done = run(argv, capture_output=True, text=True, check=False, timeout=300)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return "failed", str(exc)
+    text = (done.stdout + done.stderr).strip()
+    if done.returncode == 0:
+        return "done", text
+    if done.returncode == 126:  # pkexec: the password dialog was dismissed
+        return "cancelled", text
+    return "failed", text or f"exit {done.returncode}"
+
+
+def zip_session(path: Path) -> Path:
+    """``<session>.zip`` next to the session folder; never overwrites (``-2``, ``-3``...)."""
+    import zipfile
+
+    path = Path(path).resolve()
+    target = path.with_suffix(".zip")
+    number = 2
+    while target.exists():
+        target = path.parent / f"{path.name}-{number}.zip"
+        number += 1
+    partial = target.with_name(target.name + ".tmp")
+    try:
+        with zipfile.ZipFile(partial, "w", zipfile.ZIP_DEFLATED) as archive:
+            for file in sorted(path.rglob("*")):
+                if file.is_file():
+                    archive.write(file, Path(path.name) / file.relative_to(path))
+        os.replace(partial, target)
+    finally:
+        partial.unlink(missing_ok=True)
+    return target
+
+
+def newest_preview(root: Path | None = None) -> Path | None:
+    """The newest K1 preview recording the Setup console made (a hint, never a choice)."""
+    root = root or Path.home() / "mocap-sessions"
+    found = [p for p in root.glob("**/booster_k1-preview.pkl") if p.is_file()] if root.is_dir() else []
+    return max(found, key=lambda p: p.stat().st_mtime) if found else None
+
+
+def maintenance_result(work: Any) -> tuple[str, str]:
+    """Run firewall or zip work; never raises, so the window's maintenance slot always clears."""
+    try:
+        outcome, text = work()
+    except Exception as exc:  # noqa: BLE001 - reported in the log
+        return "failed", str(exc)
+    return str(outcome), str(text)
+
+
+def launch_block(key: str, state: dict[str, Any], *, read_guide: bool) -> str | None:
+    """Why step ``key`` cannot start now, or None."""
+    if state.get("alarm"):
+        return "Acknowledge the red alarm first."
+    if state.get("maintenance") is not None:
+        return f"Wait: {state['maintenance']} is still running."
+    if key == "mirror":
+        if state.get("mirror") is not None:
+            return "The mirror is already open."
+    elif state.get("step") is not None:
+        return "Another step is running."
+    if key not in ("preflight", "probe") and state.get("session") is None:
+        return "Needs a session: run 2 · Probe or open a session."
+    if key == "probe" and state.get("mirror") is not None:
+        return "Close the mirror before a new probe."
+    if key == "replay" and not read_guide:
+        return "Tick the box below the duration first."
+    return None
+
+
 def valid_gains_attempts(path: Path, mode: str) -> list[str]:
     session = Session(path)
     return [f"{a['id']}  {a['step'].split('@', 2)[2]}" for a in session.attempts()
@@ -334,6 +493,8 @@ def valid_gains_attempts(path: Path, mode: str) -> list[str]:
 
 
 def run_gui() -> int:  # pragma: no cover - exercised by hand and by the smoke test
+    import queue
+    import threading
     import tkinter as tk
     from tkinter import filedialog, messagebox, ttk
 
@@ -346,7 +507,8 @@ def run_gui() -> int:  # pragma: no cover - exercised by hand and by the smoke t
 
     state: dict[str, Any] = {"session": None, "meta": {}, "step": None, "mirror": None,
                              "selected": "preflight", "alarm": False, "closing": False,
-                             "preflight": None, "replay": None}
+                             "preflight": None, "replay": None, "maintenance": None}
+    results: queue.Queue[tuple[str, str, str]] = queue.Queue()  # maintenance results
     v = {name: tk.StringVar(value=value) for name, value in {
         "transport": "fake", "net": "", "robot_ip": ROBOT_IP, "domain": "0", "model": "",
         "attested": "", "firmware": "", "mode": "walking", "seconds": "10",
@@ -354,12 +516,11 @@ def run_gui() -> int:  # pragma: no cover - exercised by hand and by the smoke t
         "kd": f"{SAFE['kd']:g}", "operator": "", "gains_attempt": "", "pkl": "",
         "duration": "10", "answer": ""}.items()}
     read_guide = tk.BooleanVar(value=False)
-    try:
-        from tools.control.k1_arm_bridge import resolve_model
-        found = resolve_model(None)
-        v["model"].set(str(found) if found else "")
-    except Exception:  # noqa: BLE001 - only a default for a field
-        pass
+    v["pkl"].trace_add("write", lambda *_: read_guide.set(False))  # a new file needs a new tick
+    state["firewall"] = firewall_state()
+    v["model"].set(default_model())
+    on_net = on_robot_network(interface_choices(), ROBOT_IP)
+    v["net"].set(on_net[0] if on_net else "")
 
     # banner and alarm
     banner = tk.Label(root, font=("TkDefaultFont", 15, "bold"), fg="white", pady=6)
@@ -388,21 +549,32 @@ def run_gui() -> int:  # pragma: no cover - exercised by hand and by the smoke t
         ttk.Label(bar, text=label).grid(row=0, column=column, sticky="w", padx=4)
         widget = (ttk.Combobox(bar, textvariable=v[name], values=choices, state="readonly",
                                width=10) if choices else ttk.Entry(bar, textvariable=v[name],
-                                                                    width=16))
+                                                                    width=13))
+        if name == "net":  # this PC's addresses; typing an address or interface still works
+            widget = ttk.Combobox(bar, textvariable=v[name], values=interface_choices(),
+                                  width=22)
         widget.grid(row=1, column=column, sticky="we", padx=4)
     ttk.Label(bar, text="K1 model (K1_serial.xml)").grid(row=2, column=0, sticky="w", padx=4)
-    ttk.Entry(bar, textvariable=v["model"], width=80).grid(row=3, column=0, columnspan=5,
+    ttk.Entry(bar, textvariable=v["model"], width=60).grid(row=3, column=0, columnspan=4,
                                                            sticky="we", padx=4)
     model_button = ttk.Button(bar, text="Browse...", command=lambda: v["model"].set(
         filedialog.askopenfilename(filetypes=[("MuJoCo XML", "*.xml")]) or v["model"].get()))
-    model_button.grid(row=3, column=5, sticky="w")
+    model_button.grid(row=3, column=4, sticky="w")
     open_button = ttk.Button(bar, text="Open session...")
-    open_button.grid(row=3, column=6, sticky="e", padx=4)
+    open_button.grid(row=3, column=5, sticky="w", padx=4)
+    net_label = ttk.Label(bar, foreground="#666666", wraplength=900)
+    net_label.grid(row=2, column=1, columnspan=6, sticky="w", padx=4)
+    firewall_row = ttk.Frame(bar)
+    firewall_row.grid(row=4, column=0, columnspan=7, sticky="w", padx=4)
+    firewall_label = ttk.Label(firewall_row)
+    firewall_label.pack(side="left")
+    firewall_button = ttk.Button(firewall_row, text="Allow the robot network in the firewall")
+    firewall_button.pack(side="left", padx=8)
     session_label = ttk.Label(bar, text="No session: run 1 · Preflight, then 2 · Probe.",
                               font=big)
-    session_label.grid(row=4, column=0, columnspan=7, sticky="w", padx=4, pady=4)
-    v["mode"].trace_add("write", lambda *_: refresh())
-    v["transport"].trace_add("write", lambda *_: refresh())
+    session_label.grid(row=5, column=0, columnspan=7, sticky="w", padx=4, pady=4)
+    for name in ("mode", "transport", "net", "robot_ip"):
+        v[name].trace_add("write", lambda *_: refresh())
 
     # middle: steps, step panel
     middle = ttk.Frame(root)
@@ -485,10 +657,45 @@ def run_gui() -> int:  # pragma: no cover - exercised by hand and by the smoke t
     ttk.Button(log_tools, text="Open session folder", command=open_folder).pack(side="left")
     ttk.Button(log_tools, text="Copy log", command=copy_log).pack(side="left", padx=4)
     ttk.Button(log_tools, text="Clear", command=lambda: log.delete("1.0", "end")).pack(side="left")
+    zip_button = ttk.Button(log_tools, text="Zip session for the developers")
+    zip_button.pack(side="left", padx=12)
+    ttk.Button(log_tools, text="Open the guide", command=lambda: subprocess.Popen(
+        ["xdg-open", str(REPO_ROOT / "docs" / "k1-bringup-runbook.md")])).pack(side="left")
+
+    def maintain(kind: str, work: Any) -> None:
+        """Run ``work`` (firewall or zip) off the Tk thread; steps wait until it ends."""
+        if busy():
+            return
+        state["maintenance"] = kind
+        write(f"=== {kind}: started", "gui")
+        refresh()
+
+        def worker() -> None:
+            results.put((kind, *maintenance_result(work)))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def allow_firewall() -> None:
+        try:
+            argv = firewall_command(v["robot_ip"].get())
+        except ValueError as exc:
+            result_label.configure(text=f"Robot IP: {exc}", fg=colours["bad"])
+            return
+        maintain("Firewall", lambda: run_privileged(argv))
+
+    def zip_now() -> None:
+        session = state["session"]
+        if session is None:
+            return
+        maintain("Zip", lambda: ("done", str(zip_session(session))))
+
+    firewall_button.configure(command=allow_firewall)
+    zip_button.configure(command=zip_now)
 
     # behaviour
     def busy() -> bool:
-        return state["step"] is not None or state["mirror"] is not None
+        return (state["step"] is not None or state["mirror"] is not None
+                or state["maintenance"] is not None)
 
     def set_session(path: Path | None) -> None:
         if path is None:
@@ -546,8 +753,23 @@ def run_gui() -> int:  # pragma: no cover - exercised by hand and by the smoke t
             kind, text = rows.get(key, ("none", "not run" if state["session"] else "no session"))
             tree.item(key, values=(text,), tags=(kind,))
         locked = busy()
-        for widget in (open_button, model_button):
+        for widget in (open_button, model_button, firewall_button):
             widget.configure(state="disabled" if locked else "normal")
+        zip_button.configure(state="disabled" if locked or state["session"] is None else "normal")
+        on_net = on_robot_network([v["net"].get()], v["robot_ip"].get())
+        net_label.configure(text=(
+            f"On the robot's network ({v['robot_ip'].get()}): yes" if on_net else
+            "This PC address is not on the robot's network: pick another, or give the PC a "
+            "static address in Ubuntu Settings > Network (guide: Before the robot arrives)"))
+        firewall = state["firewall"]
+        firewall_label.configure(text={
+            "active": "Firewall (ufw): ON. The robot's DDS traffic must be allowed:",
+            "inactive": "Firewall (ufw): off, nothing to allow.",
+            "unknown": "Firewall (ufw): unknown. If it is on, allow the robot network:"}[firewall])
+        if firewall == "inactive":
+            firewall_button.pack_forget()
+        else:
+            firewall_button.pack(side="left", padx=8)
         stop_button.configure(state="normal" if state["step"] is not None else "disabled")
         if state["mirror"] is not None:
             mirror_stop.pack(side="left", padx=8)
@@ -558,20 +780,7 @@ def run_gui() -> int:  # pragma: no cover - exercised by hand and by the smoke t
         why_label.configure(text=why or "")
 
     def can_run(key: str) -> str | None:
-        if state["alarm"]:
-            return "Acknowledge the red alarm first."
-        if key == "mirror":
-            if state["mirror"] is not None:
-                return "The mirror is already open."
-        elif state["step"] is not None:
-            return "Another step is running."
-        if key not in ("preflight", "probe") and state["session"] is None:
-            return "Needs a session: run 2 · Probe or open a session."
-        if key == "probe" and state["mirror"] is not None:
-            return "Close the mirror before a new probe."
-        if key == "replay" and not read_guide.get():
-            return "Tick the box below the duration first."
-        return None
+        return launch_block(key, state, read_guide=read_guide.get())
 
     def select(_event: Any = None) -> None:
         chosen = tree.selection()
@@ -619,9 +828,17 @@ def run_gui() -> int:  # pragma: no cover - exercised by hand and by the smoke t
             row.pack(anchor="w", pady=2)
             ttk.Label(row, text="Recording (.pkl, qualified)", width=34).pack(side="left")
             ttk.Entry(row, textvariable=v["pkl"], width=22).pack(side="left")
+            sessions = Path.home() / "mocap-sessions"
             ttk.Button(row, text="Browse...", command=lambda: v["pkl"].set(
-                filedialog.askopenfilename(filetypes=[("K1 motion", "*.pkl")])
+                filedialog.askopenfilename(
+                    filetypes=[("K1 motion", "*.pkl")],
+                    initialdir=str(sessions if sessions.is_dir() else Path.home()))
                 or v["pkl"].get())).pack(side="left")
+            newest = newest_preview()
+            if newest is not None:
+                ttk.Label(options, text=f"Newest K1 preview from the Setup console: {newest}\n"
+                          "(a hint only: choose the qualified recording yourself)",
+                          foreground="#666666", wraplength=520).pack(anchor="w")
             entry(f"Duration (s, max {REPLAY_MAX_S:g})", "duration")
             ttk.Checkbutton(options, variable=read_guide, text="I have read the guide's "
                             "unverified section and step 12; the recording is qualified.",
@@ -648,11 +865,11 @@ def run_gui() -> int:  # pragma: no cover - exercised by hand and by the smoke t
                     if v["attested"].get().strip() else [])
         mode = ["--mode", v["mode"].get()]
         if key == "preflight":
-            net = ["--net", v["net"].get().strip()] if v["net"].get().strip() else []
+            net = ["--net", net_value(v["net"].get())] if net_value(v["net"].get()) else []
             return "commission", ["preflight", "--transport", v["transport"].get(), *net,
                                   "--robot-ip", v["robot_ip"].get().strip(), *model]
         if key == "probe":
-            net = ["--net", v["net"].get().strip()] if v["net"].get().strip() else []
+            net = ["--net", net_value(v["net"].get())] if net_value(v["net"].get()) else []
             firmware = (["--firmware", v["firmware"].get().strip()]
                         if v["firmware"].get().strip() else [])
             return "commission", ["probe", "--transport", v["transport"].get(), *net,
@@ -827,6 +1044,21 @@ def run_gui() -> int:  # pragma: no cover - exercised by hand and by the smoke t
         refresh()
 
     def tick() -> None:
+        while not results.empty():
+            kind, outcome, text = results.get()
+            state["maintenance"] = None
+            message = {"done": "done", "cancelled": "cancelled (no change)",
+                       "failed": "FAILED"}.get(outcome, outcome)
+            write(f"=== {kind}: {message}" + (f": {text}" if text else ""),
+                  "fail" if outcome == "failed" else "gui")
+            if kind == "Firewall":
+                state["firewall"] = firewall_state()
+            if kind == "Firewall" and outcome == "failed":
+                write("Could not ask for your password. Run this in a terminal instead: sudo "
+                      + " ".join(firewall_command(v["robot_ip"].get())[1:]), "fail")
+            if kind == "Zip" and outcome == "done":
+                subprocess.Popen(["xdg-open", str(Path(text).parent)])
+            refresh()
         for slot in ("step", "mirror"):
             runner = state[slot]
             if runner is None:
@@ -876,7 +1108,17 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover
     except ImportError:
         print("Tk is missing: sudo apt install python3-tk", file=sys.stderr)
         return 2
-    return run_gui()
+    lock = take_instance_lock()
+    if lock is None:
+        message = "K1 test window: already open, or an install is running"
+        print(message, file=sys.stderr)
+        subprocess.run(["notify-send", "K1 hardware tests", message], check=False,
+                       capture_output=True)
+        return 3
+    try:
+        return run_gui()
+    finally:
+        lock.close()
 
 
 if __name__ == "__main__":

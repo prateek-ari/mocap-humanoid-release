@@ -132,9 +132,15 @@ robot by itself: each step runs the same `k1_commission.py` command as this guid
 - **Top bar:** grey **PRACTICE** (fake robot) or red **REAL ROBOT**. The real stop is always the
   remote: LT+BACK.
 - **Robot connection:** transport (`fake` to practise, `booster` for the robot), this PC's
-  interface or address (`--net`), the robot's IP, the DDS domain, the robot mode you set with the
-  remote, and the K1 model (`K1_serial.xml`, **Browse...**). Fill in **Attested serial** and
-  **Firmware** only when the robot cannot report its serial (step 2).
+  address on the robot network (**PC interface or IP**: a list of this PC's addresses; the one on
+  the robot's network is chosen for you, and a grey line says when none is), the robot's IP, the
+  DDS domain, the robot mode you set with the remote, and the K1 model (`K1_serial.xml`, filled in
+  when the installer put it in `~/mocap-runtime`, else **Browse...**). Fill in **Attested serial**
+  and **Firmware** only when the robot cannot report its serial (step 2).
+- **Firewall:** the window shows whether Ubuntu's firewall (ufw) is on. If it is on or unknown,
+  **Allow the robot network in the firewall** asks for your password in a normal Ubuntu dialog and
+  allows the robot's network (`ufw allow from 192.168.10.0/24`). If no dialog can open, the log
+  shows the command to run in a terminal instead.
 - **Steps (left):** each step's evidence in the open session: green = valid, red = failed or no
   longer valid (with the reason), orange = interrupted (`INCOMPLETE`), grey = not run, blue = a file
   was saved (mirror ranges, the record; the record turns red "STALE" when a step changed after it).
@@ -149,13 +155,18 @@ robot by itself: each step runs the same `k1_commission.py` command as this guid
   text field and **Send**. Each answer is sent once.
 - **Log (bottom):** the script's output, live: PASS in green, FAIL and errors in red. A yellow
   **What to check** box explains a failure. Each run's log is also saved in
-  `$S/gui-logs/`; **Open session folder** and **Copy log** help when you send it to the developers.
+  `$S/gui-logs/`. **Zip session for the developers** packs the whole session folder into
+  `<session>.zip` next to it and opens that folder: send that file. **Open the guide** opens this
+  guide. While the firewall or zip action runs, the steps wait.
 - **Red alarm:** when a release is not confirmed, or a run ends abnormally (crash, killed, an
   interrupted attempt), a red bar says **stop the robot with the remote now**. Nothing else runs
   until you press **I have stopped the robot with the remote**.
 - **The mirror (step 3)** runs beside the other steps; **Close mirror** stops it. Closing the
   window while a step runs asks first, stops the step and waits for its release. If the window
   itself crashes, the script gets Ctrl-C and releases the arms.
+- **Step 12:** **Browse...** opens the Setup console's sessions folder (`~/mocap-sessions`), and the
+  panel names the newest K1 preview there as a hint. Choose the qualified recording yourself;
+  choosing another file clears the tick.
 
 Practise the whole ladder in the window with transport `fake` before the robot arrives.
 
