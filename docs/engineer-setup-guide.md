@@ -121,7 +121,7 @@ Live route. Both PCs must be on the Xsens router by Ethernet, and step 03 must c
 
 In the Setup console, open **04–05 Windows: suit and streaming**. It shows the exact values to type on Windows, each with a **Copy** button:
 
-![Step 04–05: the destination IP, port and protocol to enter in Xsens Network Streamer, and the firewall command](engineer-guide-assets/setup-05-windows.png)
+![Step 04–05: the destination IP, port and protocol to enter in Xsens Network Streamer; Allow in firewall added the rule, and the terminal command stays below as a fallback](engineer-guide-assets/setup-05-windows.png)
 
 On **Windows**, in Xsens Humanoid open **Options → Network Streamer** (labels vary by version):
 
@@ -175,6 +175,8 @@ and stand still with arms down for the first seconds. Both robots use the same
 received frame and calibrate automatically. Click **Stop** when you are done.
 See [what changed and why](live-xsens-commissioning-2026-10-14.md)
 and the [offline block diagram](live-xsens-g1-t1-diagram.html).
+
+![Step 07: G1 and T1 side by side running from one Xsens stream, with auto-calibration](engineer-guide-assets/setup-07-compare.png)
 
 From a terminal, the same comparison is:
 
@@ -247,7 +249,7 @@ Open **10 Watch and record** and choose **Preview** or **Arm-aligned**.
 2. Stop Network Streamer on Windows and save the take.
 3. Open **11 Finish** and click **Save report**. It saves the project version (`project-revision.txt`) and a check report (`core-doctor.json`) in the session folder and lists every file of the session, with links to the reports and videos.
 
-![Step 11: report saved; all session files listed](engineer-guide-assets/setup-11-finish.png)
+![Step 11: report saved; all session files listed; Shut down the console at the bottom](engineer-guide-assets/setup-11-finish.png)
 
 For the next take, go back to step 03 and click **New session**. Closing the browser tab leaves the console running in the background, ready for the menu entry. To stop it, click **Shut down the console** at the bottom of **11 Finish** and confirm: a running job stops first, then the console exits. An open K1 test window stays open. **Mocap Setup** in the menu starts it again. (Also possible: right-click **Mocap Setup** → **Stop the Setup console**, or `bash tools/setup/open_console.sh --stop`.)
 
@@ -290,8 +292,12 @@ This step is for the day the Booster K1 is on site. It moves a real robot, so fo
 2. **PC:** an Ubuntu 22.04 or 24.04 PC wired to the robot, address `192.168.10.10/24`. The Windows app cannot drive the robot (the Booster SDK is Linux-only).
 3. **Robot facts first:** check the robot's IP address (Booster default `192.168.10.102`), firmware (the SDK expects 1.8.0), DDS domain, serial number and the remote's emergency stop against Booster's manual. The guide's table "What to find out about the robot first" lists each one.
 4. **Install:** in the Setup console open **13 Real K1**. It shows the Booster SDK, Tk, the GMR runtime and the K1 model as FOUND or MISSING. Click **Install K1 test tools** (no password needed; safe to run again; it fails with a clear message while a K1 window is open). If Tk is MISSING, click **Install Tk** and enter your password. (Terminal: `bash tools/setup/install.sh recorded --with-booster`.)
-5. **Practise first:** click **Open K1 test window** in step 13, or open **K1 Hardware Tests** from the applications menu (terminal: `.venv/bin/python tools/control/k1_commission_gui.py`). Only one window opens at a time; shutting down the Setup console leaves it open. Keep transport `fake`, choose the K1 model (`~/mocap-runtime/GMR/assets/booster_k1/K1_serial.xml`) and click through the steps from **1 · Preflight**. Without a screen, use the script: `.venv/bin/python tools/control/k1_commission.py probe --model <K1_serial.xml>`, then follow the **Next:** line each step prints.
-6. **On the robot:** the same steps with transport `booster` and `--net 192.168.10.10` (in the window: **Transport** and **PC interface or IP**): probe, mirror, zero-check, quick-release, hold, balance, command-loss, signs, gains, record. Each step shows its plan and waits for `yes` before the robot moves, and stops and releases the arms when a check fails.
-7. **Status:** `.venv/bin/python tools/control/k1_commission.py status --session <folder>` shows which steps passed and what to run next.
+5. **Practise first:** click **Open K1 test window** in step 13, or open **K1 Hardware Tests** from the applications menu (terminal: `.venv/bin/python tools/control/k1_commission_gui.py`). Only one window opens at a time; shutting down the Setup console leaves it open. Keep transport `fake`; the K1 model is filled in from `~/mocap-runtime/GMR/assets/booster_k1/K1_serial.xml` (else **Browse...**). Click through the steps from **1 · Preflight**. Without a screen, use the script: `.venv/bin/python tools/control/k1_commission.py probe --model <K1_serial.xml>`, then follow the **Next:** line each step prints.
+6. **On the robot:** the same steps with transport `booster` and `--net 192.168.10.10` (in the window: **Transport** and **PC interface or IP**): probe, mirror, zero-check, quick-release, hold, balance, command-loss, signs, gains, record. Each step shows its plan and the checklist and waits for **All of the above is true: start** before the robot moves, and stops and releases the arms when a check fails. The red **STOP step** button is Ctrl-C to the script; the remote (LT+BACK) is the real stop.
+7. **Status:** the window's step list shows which steps passed and why the others are not valid (terminal: `.venv/bin/python tools/control/k1_commission.py status --session <folder>`). **Zip session for the developers** packs the session to send.
+
+![Step 13: the K1 test tools found on this PC, and the K1 test window opened](engineer-guide-assets/setup-13-k1.png)
+
+![The K1 test window on the practice robot: before the takeover it shows the safety checklist and waits for "All of the above is true: start"](engineer-guide-assets/k1-test-window.png)
 
 If a step fails, read its **What to check** line and the guide's failure table before you run it again.

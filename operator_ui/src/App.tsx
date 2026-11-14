@@ -375,8 +375,8 @@ export function App({ client = defaultClient, setupClient = defaultSetupClient }
     <div className="app-shell">
       <header className="app-header">
         <div className="brand">
-          <strong>MOCAP / G1</strong>
-          <span className="silk">Operator console · G1 EDU 29-DOF</span>
+          <strong>MOCAP / OPERATOR</strong>
+          <span className="silk">Console · Booster K1, Unitree G1, Booster T1</span>
         </div>
         <nav className="workspace-switch" aria-label="Workspace">
           {setupAvailable && (
