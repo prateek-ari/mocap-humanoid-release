@@ -1991,7 +1991,9 @@ class SetupWorkbench:
         if options["record_video"]:
             argv.append("--record-video")
         if options.get("robot_stream"):
-            argv += ["--robot-stream", ROBOT_STREAM_URL]
+            # Less filter lag for the real arms: the settings the K1 followed with no lag hold.
+            argv += ["--robot-stream", ROBOT_STREAM_URL,
+                     "--filter-min-cutoff", "3", "--filter-beta", "1.5"]
         return argv
 
     def _run_live(self, job, session, raw, options) -> tuple[int, bool]:
