@@ -132,25 +132,42 @@ robot by itself: each step runs the same `k1_commission.py` command as this guid
 `k1_arm_bridge.py`, step 13 and the quick start run `k1_live_bridge.py`), with the same checks,
 limits and evidence.
 
-- **Quick start (first screen):** set the robot connection (next item), **Stage**, **Time
-  limit**, **Stream port**, **Support** (default "held by a person"), your name, optionally the
-  **Acceptance record**, **Strap clear of both arms** (hoist; untick: shoulders stay within 0.6 rad
-  of rest) and **Head follows** (shown only when the head code is in this build). **Check robot
-  and stream** probes the robot read-only (a new session), checks it (walking, not fallen, fresh
-  joint state, joints in range) and the suit stream (fresh, calibrated, tracking on, model, clock,
-  the performer's arms within 0.4 rad of the robot's), then shows a summary with any warnings
-  (stage-gate problems, no acceptance record) and one **Go** button. A failed check says what to
-  fix and the button becomes **Re-check**; there is no Go. Changing a setting while Go is shown
-  clears it (press **Re-check**). **STOP** works as in the steps. Practice: **Start practice
-  sender** streams a slow pattern instead of the suit.
+- **Quick start (first screen).** The fields fill themselves: the window remembers the last
+  transport, PC interface, K1 model, your name, stage, support and time limit
+  (`~/.local/state/mocap-g1/k1-window.json`; a missing or bad file gives the defaults). On the
+  first run the PC interface is the one PC address on the robot's network (when there is exactly
+  one) and the K1 model is found without **Browse** (GMR, then `K1_serial.xml` in
+  `$MOCAP_WS` or `~/mocap-runtime`). An empty field is named in plain words
+  under the buttons.
+  1. **Check robot and stream** fills a numbered checklist, one line per check, each with a lamp
+     (green OK, red FIX, grey "..." = not checked yet), the result and, on a red line, **what to
+     do**: PC on the robot's network · robot answers · robot standing in walking mode, not fallen,
+     joints in range · live tool is sending · calibrated · tracking on · model matches · clock ·
+     the performer's arms near the robot's (the gap and the 0.4 rad limit). These are the same two
+     read-only auto-checks as on the command line.
+  2. **The check repeats by itself** every 2 s until every line is green, or until you click
+     **Stop checking**. Fix one line and watch its lamp change. The robot never moves while it
+     checks. The first check probes the robot and makes the session; the repeats use that session
+     (no new session each time). After a run, the next Check makes a new session.
+  3. **Go** turns on when both checks pass. The warnings (stage-gate problems, no acceptance
+     record) are listed beside it and do not block. A changed setting clears the Go and the check
+     runs again. No Go, no motion.
+  4. **While it runs**, one large line shows the phase (waiting for the arms to match, aligning,
+     following, holding), the seconds followed of the time limit, whether the head follows (and
+     why it is off) and the lag holds. **STOP** works as in the steps.
+  5. **At the end**: PASS, or the stop reason with what to do next (for example "The performer
+     moved faster than the arms can follow for 6 s: start again and move slowly at first"), and
+     the attempt file.
+
+  Practice: **Start practice sender** streams a slow pattern instead of the suit.
 
 - **Top bar:** grey **PRACTICE** (fake robot) or red **REAL ROBOT**. The real stop is always the
   remote: LT+BACK.
 - **Robot connection:** transport (`fake` to practise, `booster` for the robot), this PC's
   address on the robot network (**PC interface or IP**: a list of this PC's addresses; the one on
   the robot's network is chosen for you, and a grey line says when none is), the robot's IP, the
-  DDS domain, the robot mode you set with the remote, and the K1 model (`K1_serial.xml`, filled in
-  when the installer put it in `~/mocap-runtime`, else **Browse...**). Fill in **Attested serial**
+  DDS domain, the robot mode you set with the remote, and the K1 model (`K1_serial.xml`, found
+  for you as in the quick start, else **Browse...**). Fill in **Attested serial**
   and **Firmware** only when the robot cannot report its serial (step 2).
 - **Firewall:** the window shows whether Ubuntu's firewall (ufw) is on. If it is on or unknown,
   **Allow the robot network in the firewall** asks for your password in a normal Ubuntu dialog and

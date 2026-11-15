@@ -96,12 +96,12 @@ STEPS: list[tuple[str, str, str, str]] = [
 ]
 TITLES = {key: title for key, title, _what, _moves in STEPS}
 TITLES["quick"] = "Quick start"
-QUICK_TEXT = ("Live arms in two clicks. Check: the tool probes the robot (read-only) and makes a "
-              "new session, then checks the robot (walking, not fallen, fresh joint state, joints "
-              "in range) and the suit stream (fresh, calibrated, tracking on, model, clock, the "
-              "performer's arms near the robot's). It shows a summary with any warnings; Go starts "
-              "the arms. Before Check: the live tool streams (--robot-stream), Calibrate and "
-              "Tracking on are done, the performer stands with arms down.")
+QUICK_TEXT = ("1. Fill the fields (the window remembers them).  2. Check robot and stream: the "
+              "list below fills in and the check repeats by itself (read-only, the robot never "
+              "moves) until every line is green. Fix the red lines one by one with 'What to do'.  "
+              "3. Go starts the arms; warnings beside Go do not block.")
+#: Seconds between the end of a failed check and the next one.
+REPEAT_S = 2.0
 #: Steps whose confirm question is the owner's Go (the summary is its detail).
 GO_STEPS = ("quick", "live", "replay")
 
@@ -126,6 +126,8 @@ class RunResult:
     verdict: str  # PASS FAIL INCOMPLETE DONE REFUSED CANCELLED STOPPED CRASHED
     alarm: str | None
     hint: str = ""
+    #: The attempt's own reason (a FAIL), or ``""``.
+    reason: str = ""
 
 
 @dataclass
@@ -146,6 +148,8 @@ class StepRunner:
     rpc: list[bool] = field(default_factory=list)
     #: The newest ``live`` status of the live bridge (step 13).
     live: dict[str, Any] | None = None
+    #: The quick start's auto-check lines by key (``checks`` events), newest first wins.
+    checks: dict[str, dict[str, Any]] = field(default_factory=dict)
     #: Helpers (the practice sender) stopped when this run has ended.
     companions: list[Any] = field(default_factory=list)
     _reader: Any = None
@@ -219,6 +223,8 @@ class StepRunner:
             self.bridge_state = event.get("bridge_state")
         elif kind == "live":
             self.live = event
+        elif kind == "checks":
+            self.checks.update({str(item["key"]): item for item in event.get("items", [])})
 
     def answer(self, prompt_id: int, text: str) -> bool:
         """Send one answer to the open question; refuses stale ids, repeats and newlines."""
@@ -243,11 +249,11 @@ class StepRunner:
     def result(self) -> RunResult:
         code = self.process.returncode if self.process is not None else None
         text = "\n".join(self.lines)
-        verdict = None
+        verdict, reason = None, ""
         if self.attempt is not None:
             try:
                 data = json.loads(Path(self.attempt["path"]).read_text(encoding="utf-8"))
-                verdict = str(data.get("verdict"))
+                verdict, reason = str(data.get("verdict")), str(data.get("reason") or "")
             except (OSError, ValueError, KeyError):
                 verdict = "INCOMPLETE"
         if verdict is None:
@@ -281,7 +287,7 @@ class StepRunner:
             refused = next((line for line in reversed(self.lines)
                             if line.startswith(("REFUSED:", "ERROR:"))), "")
             found = hint(refused.split(":", 1)[1].strip()) if refused else ""
-        return RunResult(verdict, alarm, found)
+        return RunResult(verdict, alarm, found, reason)
 
 
 @dataclass
@@ -367,14 +373,21 @@ def live_command(session: Path, meta: dict[str, Any], *, stage: str, time_limit:
 def quick_command(*, transport: str, net: str, domain: str, model: str, stage: str,
                   time_limit: str, port: str, support: str, strap_clear: bool, head: bool,
                   record: str = "", operator: str = "", attested: str = "", firmware: str = "",
-                  root: Path | None = None) -> list[str]:
-    """The k1_live_bridge.py arguments of the quick start (from cold: no ``--session``)."""
+                  root: Path | None = None, session: Path | None = None) -> list[str]:
+    """The k1_live_bridge.py arguments of the quick start: from cold (the probe makes a new
+    session), or with ``session`` when a check repeats (its probe passed: no new session)."""
     if transport not in ("fake", "booster"):
         raise ValueError("transport: choose fake or booster")
+    if transport == "booster" and not net.strip():
+        raise ValueError("'PC interface' is empty: choose the PC address on the robot's network")
+    if transport == "booster" and not model.strip():
+        raise ValueError("'K1 model' is empty: click Browse and choose K1_serial.xml")
+    if model.strip() and not Path(model.strip()).is_file():
+        raise ValueError(f"'K1 model': {model.strip()} is not a file; click Browse")
     if stage not in ("hoist", "standing"):
         raise ValueError("stage: choose hoist or standing")
     if not support.strip() or "\n" in support:
-        raise ValueError("support: say how the robot is held")
+        raise ValueError("'Support' is empty: say how the robot is held")
     args = ["--transport", transport, "--domain-id", bounded("DDS domain", domain, 0, 232),
             "--root", str(root or ROOT), "--stage", stage,
             "--time-limit", bounded("time limit", time_limit, 1, live.MAX_TIME_LIMIT_S),
@@ -391,6 +404,8 @@ def quick_command(*, transport: str, net: str, domain: str, model: str, stage: s
         args.append("--strap-not-clear")
     if not head:
         args.append("--no-head")
+    if session is not None:
+        args += ["--session", str(session)]
     return args
 
 
@@ -444,6 +459,178 @@ def live_status_text(event: dict[str, Any]) -> tuple[str, str]:
     if event.get("release") == "failed":
         kind = "bad"
     return kind, f"{head}\n{line}"
+
+
+# -- the quick start's checklist ---------------------------------------------------
+
+#: (key, line, what to do when it fails); the keys are the live bridge's ``checks`` keys
+#: except ``network``, which the window checks itself.
+CHECK_LINES: list[tuple[str, str, str]] = [
+    ("network", "PC on the robot's network",
+     "Choose the PC address on the robot's network (192.168.10.x) in 'PC interface'. None there: "
+     "put the robot cable in, then give the PC the static address 192.168.10.10 in Ubuntu "
+     "Settings > Network."),
+    ("answers", "Robot answers",
+     "Robot does not answer: put the cable in and switch the laptop on first, then power the "
+     "robot off and on. When it stands again, the check goes on by itself."),
+    ("robot", "Robot standing in walking mode, not fallen, joints in range",
+     "Set walking mode with the remote; if it fell, stand it up (hoist); arms down by the "
+     "sides, head straight."),
+    ("sending", "Live tool is sending",
+     "No stream: in the Setup console, step 07, tick 'Send the arms to the K1 window' and start "
+     "the live simulation."),
+    ("calibrated", "Calibrated",
+     "Not calibrated: performer stands still, arms down, looking straight ahead, then Calibrate "
+     "(Setup console step 07, or N in the live tool's window)."),
+    ("tracking", "Tracking on",
+     "Tracking is off: switch it on (Setup console step 07, or Space in the live tool's window)."),
+    ("model", "Model matches",
+     "The live tool streams another robot: start the live simulation for the K1 (booster_k1), "
+     "with the same K1_serial.xml as 'K1 model' here."),
+    ("clock", "Clock",
+     "Start the live tool on this laptop from the Setup console (not on another PC), then check "
+     "again."),
+    ("arms", "Performer's arms near the robot's",
+     "Arms differ: performer lowers the arms like the robot's and holds still."),
+]
+PRACTICE_SENDING = "Practice robot: click 'Start practice sender' (it plays a performer)."
+
+
+def network_check(transport: str, net: str, robot_ip: str,
+                  choices: list[str]) -> tuple[bool | None, str]:
+    """The checklist's first line, from the fields (``choices``: ``interface_choices()``)."""
+    if transport != "booster":
+        return True, "practice robot: no network needed"
+    value = net_value(net)
+    if not value:
+        return False, "'PC interface' is empty"
+    addresses = [net_value(c) for c in choices if value in (net_value(c), c.split("(")[-1].rstrip(")"))]
+    found = on_robot_network(addresses or [value], robot_ip)
+    if found:
+        return True, f"{found[0]} is on the robot's network ({robot_ip}/24)"
+    return False, f"{value} is not on the robot's network ({robot_ip}/24)"
+
+
+def checklist_rows(checks: dict[str, dict[str, Any]], network: tuple[bool | None, str], *,
+                   practice: bool) -> list[tuple[int, str, str, str, str]]:
+    """``(number, line, lamp, result, what to do)`` per line; lamp ok, fail or wait."""
+    rows = []
+    for number, (key, line, advice) in enumerate(CHECK_LINES, 1):
+        item = {"ok": network[0], "text": network[1]} if key == "network" else checks.get(key, {})
+        ok = item.get("ok")
+        if practice and key == "sending":
+            advice = PRACTICE_SENDING
+        rows.append((number, line, "ok" if ok else "wait" if ok is None else "fail",
+                     str(item.get("text", "not checked yet")), advice if ok is False else ""))
+    return rows
+
+
+def go_warnings(detail: str) -> list[str]:
+    """The warnings of the Go summary (``Warnings:`` and its ``  - `` lines)."""
+    lines = detail.splitlines()
+    if "Warnings:" not in lines:
+        return []
+    return [line.strip()[2:] for line in lines[lines.index("Warnings:") + 1:]
+            if line.startswith("  - ")]
+
+
+PHASES = {"waiting": "WAITING for the performer's arms to match the robot's",
+          "aligning": "ALIGNING: the arms move slowly to the performer's",
+          "following": "FOLLOWING the performer",
+          "lag-hold": "HOLDING: the performer moved too fast; re-aligning next",
+          "stopping": "STOPPING: the arms slow down, then go back to the robot",
+          "released": "RELEASED: the arms are back with the robot"}
+
+
+def head_text(status: Any, off_why: str = "") -> str:
+    if status == "disabled":
+        return "Head: off ('Head follows' is unticked)"
+    if status in (None, "none"):
+        return "Head: off (no head control on this connection)"
+    if status == "off":
+        return f"Head: OFF for this run ({off_why or 'see the log'}); the arms go on"
+    return f"Head: on ({status})"
+
+
+def quick_status_text(event: dict[str, Any], off_why: str = "") -> str:
+    """The quick start's one large status line while it runs."""
+    state = str(event.get("state"))
+    phase = PHASES.get(state, state.upper())
+    if state == "waiting" and event.get("gate"):
+        phase += f" ({event['gate']})"
+    return (f"{phase}   ·   followed {event.get('following_s') or 0:.0f} of "
+            f"{event.get('time_limit_s') or 0:.0f} s   ·   {head_text(event.get('head'), off_why)}"
+            f"   ·   lag holds {event.get('lag_holds', 0)}")
+
+
+#: Why a live run stopped, in plain words, and what to do (prefix match on the attempt's
+#: reason without "stopped: "); the commissioning table (``hint``) is the fallback.
+LIVE_ADVICE = {
+    "lag_stop": "The performer moved faster than the arms can follow for 6 s. Start again "
+                "(Check, Go) and move slowly at first.",
+    "stream_late": "The stream arrived late for 3 s: the laptop was busy or the suit link is "
+                   "weak. Close other programs, check the suit, then Check and Go.",
+    "source_hard_timeout": "The stream stopped (live tool closed, suit link lost) or the laptop "
+                           "stalled. Check that the live tool still runs, close other programs, "
+                           "then Check and Go.",
+    "state_stale": "The robot's joint states stopped arriving: the laptop was busy or the cable "
+                   "moved. Close other programs, check the cable, then Check and Go.",
+    "state_clock": "The laptop was busy (joint-state times ran ahead of its clock). Close other "
+                   "programs, then Check and Go.",
+    "real_time_lost": "The control loop stalled (the laptop was busy). Close other programs, then "
+                      "Check and Go.",
+    "new_session": "The live tool was restarted during the run. Check and Go again.",
+    "new_epoch": "A new Calibrate during the run stops the arms (normal). Check and Go again.",
+    "tracking_off": "Tracking was switched off in the console. Switch it on, then Check and Go.",
+    "clock_mismatch": "The stream's clock is not this laptop's: start the live tool on this laptop "
+                      "from the Setup console, then Check and Go.",
+    "mode_not_allowed": "The robot left walking mode (remote). Set walking mode with the remote, "
+                        "then Check and Go.",
+    "mode_unknown": "The robot mode could not be read (network?). Check the cable, then Check and Go.",
+    "fall_state": "The robot reports a fall. Check the robot on the hoist before anything else.",
+    "stream_drops": "The stream sent many bad packets. Restart the live tool, then Check and Go.",
+    "run_limit": "The run waited or held too long. Check and Go again.",
+    "never followed": "The arms never reached the performer's. Performer lowers the arms like the "
+                      "robot's, then Check and Go.",
+    "coarse gate not met": "The performer's arms did not match the robot's within 60 s after Go. "
+                           "Performer lowers the arms like the robot's, then Check and Go.",
+    "the robot changed since the checks": "The robot changed between Check and Go (see the "
+                                          "reason). Fix it, then Check and Go.",
+    "operator stop before the takeover": "STOP before the arms took over: nothing moved.",
+    "release not confirmed": "The release was not confirmed: stop the robot with the remote "
+                             "(LT+BACK) and send the session folder to the developers.",
+}
+
+
+def live_advice(reason: str | None) -> str:
+    if not reason:
+        return ""
+    text = reason.removeprefix("stopped: ")
+    for prefix in sorted(LIVE_ADVICE, key=len, reverse=True):
+        if text.startswith(prefix):
+            return LIVE_ADVICE[prefix]
+    return hint(text) or "Send the session folder to the developers (Zip session)."
+
+
+def quick_end_text(outcome: RunResult, attempt: dict[str, Any] | None, head_off: str) -> str:
+    """The quick start's result: PASS or the stop reason with what to do, and the attempt file."""
+    if attempt is None:
+        return f"Quick start: {outcome.verdict}"
+    if outcome.verdict == "PASS":
+        text = "PASS: the arms followed and were handed back."
+    else:
+        text = (f"{outcome.verdict}: {outcome.reason or 'see the log'}\n"
+                f"What to do: {live_advice(outcome.reason)}")
+    if head_off:
+        text += (f"\nThe head was switched off during the run ({head_off}); the arms went on. "
+                 "If it happens again, untick 'Head follows'.")
+    return text + f"\nAttempt file: {attempt.get('path')}"
+
+
+def head_off_reason(lines: list[str]) -> str:
+    """Why the head switched off (its ``HEAD OFF:`` line), or ``""``."""
+    found = next((line for line in reversed(lines) if line.startswith("HEAD OFF:")), "")
+    return found.removeprefix("HEAD OFF:").split("; the arms continue")[0].strip()
 
 
 # -- the stage ladder -------------------------------------------------------------
@@ -592,14 +779,72 @@ def take_instance_lock(path: Path | None = None) -> Any:
     return handle
 
 
-def default_model() -> str:
+def default_model(home: Path | None = None) -> str:
+    """The K1 model without Browse: GMR's registered model, else ``K1_serial.xml`` in the usual
+    runtime folders ($MOCAP_WS, ~/mocap-runtime), else ``""``."""
     try:
         from tools.control.k1_arm_bridge import resolve_model
         found = resolve_model(None)
     except Exception:  # noqa: BLE001 - only a default for a field
         found = None
-    fallback = Path.home() / "mocap-runtime" / "GMR" / "assets" / "booster_k1" / "K1_serial.xml"
-    return str(found) if found else str(fallback) if fallback.is_file() else ""
+    if found is None:
+        relative = Path("GMR") / "assets" / "booster_k1" / "K1_serial.xml"
+        folders = [Path(os.environ["MOCAP_WS"])] if os.environ.get("MOCAP_WS") else []
+        folders.append((home or Path.home()) / "mocap-runtime")
+        found = next((folder / relative for folder in folders if (folder / relative).is_file()),
+                     None)
+    return str(found) if found else ""
+
+
+def default_net(choices: list[str], robot_ip: str) -> str:
+    """The PC address on the robot's network when there is exactly one, else ``""``."""
+    found = on_robot_network(choices, robot_ip)
+    return found[0] if len(found) == 1 else ""
+
+
+#: The fields the window remembers, and the values each may take (None: any one-line text).
+PREFS: dict[str, tuple[str, ...] | None] = {
+    "transport": ("fake", "booster"), "net": None, "model": None, "operator": None,
+    "live_stage": ("hoist", "standing"), "support": None, "time_limit": None}
+
+
+def prefs_path() -> Path:
+    return lock_path().parent / "k1-window.json"
+
+
+def load_prefs(path: Path | None = None) -> dict[str, str]:
+    """The remembered fields; a missing or bad file or value is left out (the default)."""
+    try:
+        data = json.loads((path or prefs_path()).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    found = {}
+    for key, allowed in PREFS.items():
+        value = data.get(key)
+        if isinstance(value, str) and "\n" not in value and len(value) < 1000 and (
+                allowed is None or value in allowed):
+            found[key] = value
+    if "time_limit" in found:
+        try:
+            bounded("time limit", found["time_limit"], 1, live.MAX_TIME_LIMIT_S)
+        except ValueError:
+            del found["time_limit"]
+    return found
+
+
+def save_prefs(values: dict[str, str], path: Path | None = None) -> None:
+    """Remember the fields (best effort: a read-only state folder only loses the memory)."""
+    path = path or prefs_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        partial = path.with_name(path.name + ".tmp")
+        partial.write_text(json.dumps({k: values[k] for k in PREFS if k in values}, indent=1),
+                           encoding="utf-8")
+        os.replace(partial, path)
+    except OSError:
+        pass
 
 
 def interface_choices() -> list[str]:
@@ -764,7 +1009,10 @@ def run_gui() -> int:  # pragma: no cover - exercised by hand and by the smoke t
                              "selected": "preflight", "alarm": False, "closing": False,
                              "preflight": None, "replay": None, "maintenance": None,
                              "live_run": None, "live_stage": "hoist", "live_lock": {},
-                             "sender": None, "ladder": [], "ladder_window": None}
+                             "sender": None, "ladder": [], "ladder_window": None,
+                             # the quick start: checking repeats, its session, lines, Go given
+                             "checking": False, "check_session": None, "checks": {},
+                             "repeat": None, "rounds": 0, "went": False}
     results: queue.Queue[tuple[str, str, str]] = queue.Queue()  # maintenance results
     v = {name: tk.StringVar(value=value) for name, value in {
         "transport": "fake", "net": "", "robot_ip": ROBOT_IP, "domain": "0", "model": "",
@@ -780,9 +1028,12 @@ def run_gui() -> int:  # pragma: no cover - exercised by hand and by the smoke t
     read_guide = tk.BooleanVar(value=False)
     v["pkl"].trace_add("write", lambda *_: read_guide.set(False))  # a new file needs a new tick
     state["firewall"] = firewall_state()
-    v["model"].set(default_model())
-    on_net = on_robot_network(interface_choices(), ROBOT_IP)
-    v["net"].set(on_net[0] if on_net else "")
+    for name, value in load_prefs().items():
+        v[name].set(value)
+    if not Path(v["model"].get()).is_file():
+        v["model"].set(default_model())
+    if not v["net"].get():
+        v["net"].set(default_net(interface_choices(), ROBOT_IP))
 
     # banner and alarm
     banner = tk.Label(root, font=("TkDefaultFont", 15, "bold"), fg="white", pady=6)
@@ -859,18 +1110,16 @@ def run_gui() -> int:  # pragma: no cover - exercised by hand and by the smoke t
             row=1, column=column, sticky="w", padx=4)
     qrecord = ttk.Frame(quick)
     qrecord.pack(anchor="w", padx=6, pady=2)
-    ttk.Label(qrecord, text="Acceptance record (optional; without one: attempt 049's settings, "
-              "a warning)").pack(side="left")
-    ttk.Entry(qrecord, textvariable=v["record"], width=40).pack(side="left", padx=4)
+    ttk.Label(qrecord, text="Acceptance record (optional)").pack(side="left")
+    ttk.Entry(qrecord, textvariable=v["record"], width=36).pack(side="left", padx=4)
     record_button = ttk.Button(qrecord, text="Browse...", command=lambda: v["record"].set(
         filedialog.askopenfilename(filetypes=[("Acceptance record", "*.json")],
                                    initialdir=str(ROOT if ROOT.is_dir() else REPO_ROOT))
         or v["record"].get()))
     record_button.pack(side="left")
-    qticks = ttk.Frame(quick)
-    qticks.pack(anchor="w", padx=6, pady=2)
+    qticks = qrecord  # one row: the record and the two ticks
     ttk.Checkbutton(qticks, variable=strap_clear, text="Strap clear of both arms (hoist; "
-                    "untick: shoulders stay within 0.6 rad of rest)").pack(side="left")
+                    "untick: shoulders stay within 0.6 rad of rest)").pack(side="left", padx=16)
     if has_head:  # without the head module --no-head does nothing: no tick box
         ttk.Checkbutton(qticks, variable=head_follows, text="Head follows").pack(side="left",
                                                                                  padx=16)
@@ -879,13 +1128,51 @@ def run_gui() -> int:  # pragma: no cover - exercised by hand and by the smoke t
     check_button = tk.Button(qbuttons, text="Check robot and stream", font=big, bg="#1f5fa8",
                              fg="white", width=22)
     check_button.pack(side="left")
+    uncheck_button = ttk.Button(qbuttons, text="Stop checking")
+    uncheck_button.pack(side="left", padx=8)
+    go_button = tk.Button(qbuttons, text="Go", font=big, bg="#1e7b34", fg="white", width=8)
+    go_button.pack(side="left", padx=8)
     quick_stop = tk.Button(qbuttons, text="STOP", font=big, bg="#b3261e", fg="white", width=10)
     quick_stop.pack(side="left", padx=8)
     quick_sender = ttk.Button(qbuttons, text="Start practice sender")
     ttk.Label(qbuttons, text="STOP = Ctrl-C to the tool: it slows the arms, then releases "
               "them.\nThe real stop is the remote: LT+BACK.", foreground="#b3261e").pack(side="left")
-    quick_result = tk.Label(quick, font=big, justify="left", wraplength=1300, anchor="w")
-    quick_result.pack(anchor="w", padx=6, pady=4)
+    go_label = tk.Label(quick, justify="left", wraplength=1300, anchor="w", fg="#b26a00")
+    go_label.pack(anchor="w", padx=6)
+    quick_result = tk.Label(quick, font=("TkDefaultFont", 14, "bold"), justify="left",
+                            wraplength=1340, anchor="w")
+    quick_result.pack(anchor="w", padx=6, pady=2)
+    checklist = ttk.Frame(quick)
+    checklist.pack(fill="x", padx=6, pady=4)
+    for column, (title, width) in enumerate((("", 3), ("", 5), ("Check", 46), ("Result", 52),
+                                             ("What to do", 0))):
+        ttk.Label(checklist, text=title, width=width or "",
+                  font=("TkDefaultFont", 10, "bold")).grid(row=0, column=column, sticky="w", padx=3)
+    checklist.columnconfigure(4, weight=1)
+    check_cells = []
+    for row in range(1, len(CHECK_LINES) + 1):
+        cells = (ttk.Label(checklist, width=3),
+                 tk.Label(checklist, width=5, fg="white", font=("TkDefaultFont", 10, "bold")),
+                 ttk.Label(checklist, width=46),
+                 ttk.Label(checklist, width=52, wraplength=380),
+                 ttk.Label(checklist, wraplength=560, foreground="#b3261e"))
+        for column, cell in enumerate(cells):
+            cell.grid(row=row, column=column, sticky="w", padx=3, pady=1)
+        check_cells.append(cells)
+    lamp_look = {"ok": ("OK", colours["valid"]), "fail": ("FIX", colours["bad"]),
+                 "wait": ("...", colours["none"])}
+
+    def show_checks() -> None:
+        network = network_check(v["transport"].get(), v["net"].get(), v["robot_ip"].get(),
+                                interface_choices())
+        rows = checklist_rows(state["checks"], network, practice=v["transport"].get() != "booster")
+        for cells, (number, line, kind, result, advice) in zip(check_cells, rows):
+            text, colour = lamp_look[kind]
+            cells[0].configure(text=f"{number}.")
+            cells[1].configure(text=text, bg=colour)
+            cells[2].configure(text=line)
+            cells[3].configure(text=result)
+            cells[4].configure(text=advice)
     tree = ttk.Treeview(middle, columns=("evidence",), height=12, selectmode="browse")
     tree.heading("#0", text="Step")
     tree.heading("evidence", text="Evidence in this session")
@@ -1090,6 +1377,7 @@ def run_gui() -> int:  # pragma: no cover - exercised by hand and by the smoke t
         zip_button.configure(state="disabled" if locked or state["session"] is None else "normal")
         on_net = on_robot_network([v["net"].get()], v["robot_ip"].get())
         net_label.configure(text=(
+            "" if v["transport"].get() != "booster" else
             f"On the robot's network ({v['robot_ip'].get()}): yes" if on_net else
             "This PC address is not on the robot's network: pick another, or give the PC a "
             "static address in Ubuntu Settings > Network (guide: Before the robot arrives)"))
@@ -1104,9 +1392,18 @@ def run_gui() -> int:  # pragma: no cover - exercised by hand and by the smoke t
             firewall_button.pack(side="left", padx=8)
         stop_button.configure(state="normal" if state["step"] is not None else "disabled")
         quick_stop.configure(state="normal" if state["step"] is not None else "disabled")
-        check_button.configure(state="disabled" if can_run("quick") else "normal",
-                               text="Re-check" if state.get("quick_run") else
-                               "Check robot and stream")
+        check_button.configure(state="disabled" if can_run("quick") or state["checking"]
+                               else "normal")
+        go_prompt = quick_go_prompt()
+        go_button.configure(state="normal" if go_prompt is not None else "disabled",
+                            bg=colours["valid"] if go_prompt is not None else "#9e9e9e")
+        warnings = go_warnings(go_prompt.detail) if go_prompt is not None else []
+        go_label.configure(text=("Warnings (they do not block Go): " + "  ·  ".join(warnings))
+                           if warnings else "All checks passed, no warnings: Go starts the arms."
+                           if go_prompt is not None else "")
+        uncheck_button.configure(state="normal" if state["checking"] or go_prompt is not None
+                                 else "disabled")
+        show_checks()
         if v["transport"].get() == "booster":
             quick_sender.pack_forget()
         else:
@@ -1129,6 +1426,13 @@ def run_gui() -> int:  # pragma: no cover - exercised by hand and by the smoke t
 
     def can_run(key: str) -> str | None:
         return launch_block(key, state, read_guide=read_guide.get())
+
+    def quick_go_prompt() -> Prompt | None:
+        """The quick start's open Go question (both checks passed), or None."""
+        runner = state["step"]
+        prompt = runner.prompt if runner is not None and runner.step == "quick" else None
+        return prompt if prompt is not None and not prompt.answered and \
+            prompt.kind == "confirm" else None
 
     live_widgets: dict[str, Any] = {}
 
@@ -1348,8 +1652,8 @@ def run_gui() -> int:  # pragma: no cover - exercised by hand and by the smoke t
             result_label.configure(text=f"Cannot start the sender: {exc}", fg=colours["bad"])
             return
         state["sender"] = sender
-        if state["step"] is not None and state["step"].step in ("live", "quick"):
-            state["step"].companions.append(sender)
+        if state["step"] is not None and (state["step"].step == "live" or state["went"]):
+            state["step"].companions.append(sender)  # a check round must not stop it
         write(f"=== Practice sender: streaming to 127.0.0.1:{port} (log {sender.log_path})", "gui")
         refresh()
 
@@ -1372,7 +1676,7 @@ def run_gui() -> int:  # pragma: no cover - exercised by hand and by the smoke t
                 support=v["support"].get(), strap_clear=strap_clear.get(),
                 head=head_follows.get() or not has_head, record=v["record"].get(),
                 operator=v["operator"].get(), attested=v["attested"].get(),
-                firmware=v["firmware"].get())
+                firmware=v["firmware"].get(), session=state["check_session"])
         model = ["--model", v["model"].get()] if v["model"].get().strip() else []
         attested = (["--attested-robot-id", v["attested"].get().strip()]
                     if v["attested"].get().strip() else [])
@@ -1458,7 +1762,8 @@ def run_gui() -> int:  # pragma: no cover - exercised by hand and by the smoke t
         logs_dir = (state["session"] or ROOT) / "gui-logs"
         runner = StepRunner(tool, args, logs_dir / f"{dt.datetime.now():%Y%m%d-%H%M%S}-{key}.log",
                             step=key)
-        runner.session = state["session"] if key not in ("probe", "quick") else None
+        runner.session = (state["session"] if key not in ("probe", "quick")
+                          else state["check_session"] if key == "quick" else None)
         write(f"=== {TITLES[key]}: {' '.join(args)}", "gui")
         try:
             runner.start()
@@ -1466,17 +1771,72 @@ def run_gui() -> int:  # pragma: no cover - exercised by hand and by the smoke t
             shown.configure(text=f"Cannot start: {exc}", fg=colours["bad"])
             return
         state["mirror" if key == "mirror" else "step"] = runner
-        if key in ("live", "quick") and state["sender"] is not None:
+        if key == "live" and state["sender"] is not None:
             runner.companions.append(state["sender"])  # stopped with the step
         if key != "mirror":
             show_live(None)
-        shown.configure(text=("Checking the robot and the stream (read-only)..." if key == "quick"
+        if key == "quick":
+            state["rounds"] += 1
+            state["went"] = False
+        shown.configure(text=(f"Checking the robot and the stream, read-only (round "
+                              f"{state['rounds']})..." if key == "quick"
                               else f"{TITLES[key]}: running..."), fg=colours["info"])
         hint_label.pack_forget()
         refresh()
 
     run_button.configure(command=lambda: launch())
-    check_button.configure(command=lambda: launch(key="quick"))
+
+    def start_checking() -> None:
+        save_prefs({name: v[name].get() for name in PREFS})
+        state["checks"], state["rounds"], state["checking"] = {}, 0, True
+        launch(key="quick")
+        if state["step"] is None:  # refused (a field is empty or wrong): the reason is shown
+            state["checking"] = False
+        refresh()
+
+    def cancel_repeat() -> None:
+        if state["repeat"] is not None:
+            root.after_cancel(state["repeat"])
+            state["repeat"] = None
+
+    def repeat_check() -> None:
+        state["repeat"] = None
+        if state["checking"] and not busy() and not state["alarm"] and not state["closing"]:
+            launch(key="quick")
+            if state["step"] is None:
+                state["checking"] = False
+        refresh()
+
+    def stop_checking() -> None:
+        """No more check rounds; a round still checking is stopped (it never moved the robot)."""
+        state["checking"] = False
+        cancel_repeat()
+        runner = state["step"]
+        if runner is not None and runner.step == "quick" and not state["went"]:
+            prompt = quick_go_prompt()
+            if prompt is not None:
+                runner.answer(prompt.id, "no")
+            else:
+                runner.stop()
+        quick_result.configure(text="Checking stopped. Press Check robot and stream to start "
+                               "again.", fg=colours["none"])
+        refresh()
+
+    def go() -> None:
+        runner, prompt = state["step"], quick_go_prompt()
+        if runner is None or prompt is None or not runner.answer(prompt.id, "yes"):
+            return
+        state["went"], state["checking"] = True, False
+        if state["sender"] is not None:
+            runner.companions.append(state["sender"])  # stopped with the run
+        write("=== Go: the arms take over when the performer's arms match the robot's.", "gui")
+        quick_result.configure(text="Go given: waiting for the performer's arms to match the "
+                               "robot's...", fg=colours["info"])
+        refresh()
+
+    check_button.configure(command=start_checking)
+    uncheck_button.configure(command=stop_checking)
+    go_button.configure(command=go)
     quick_sender.configure(command=lambda: toggle_sender(quick_start=True))
     def request_stop() -> None:
         if state["step"] is not None:
@@ -1491,9 +1851,10 @@ def run_gui() -> int:  # pragma: no cover - exercised by hand and by the smoke t
         runner = state["step"]
         prompt = runner.prompt if runner is not None and runner.step == "quick" else None
         if prompt is not None and not prompt.answered and runner.answer(prompt.id, "no"):
-            write("=== A setting changed: the Go is cleared. Press Re-check.", "gui")
-            quick_result.configure(text="A setting changed: the Go is cleared. Press Re-check.",
-                                   fg=colours["bad"])
+            text = ("A setting changed: the Go is cleared"
+                    + ("; checking again." if state["checking"] else ". Press Check robot and stream."))
+            write(f"=== {text}", "gui")
+            quick_result.configure(text=text, fg=colours["bad"])
             show_prompt(runner)
 
     for name in ("live_stage", "time_limit", "port", "support", "record", "operator", "transport",
@@ -1501,6 +1862,8 @@ def run_gui() -> int:  # pragma: no cover - exercised by hand and by the smoke t
         v[name].trace_add("write", clear_go)
     for flag in (strap_clear, head_follows):
         flag.trace_add("write", clear_go)
+    for name in ("transport", "net", "domain", "model", "attested", "firmware"):  # a new robot link
+        v[name].trace_add("write", lambda *_: state.update(check_session=None))
     mirror_stop.configure(command=lambda: state["mirror"] and state["mirror"].stop())
 
     def show_prompt(runner: StepRunner) -> None:
@@ -1509,8 +1872,8 @@ def run_gui() -> int:  # pragma: no cover - exercised by hand and by the smoke t
             child.destroy()
         answer_entry.pack_forget()
         prompt_detail.pack_forget()
-        if prompt is None or prompt.answered:
-            prompt_frame.pack_forget()
+        if prompt is None or prompt.answered or (runner.step == "quick" and prompt.kind == "confirm"):
+            prompt_frame.pack_forget()  # the quick start's Go is the button on its tab
             return
         prompt_frame.pack(fill="x", padx=8, pady=4, before=logs)
         go = prompt.kind == "confirm" and runner.step in GO_STEPS
@@ -1575,15 +1938,30 @@ def run_gui() -> int:  # pragma: no cover - exercised by hand and by the smoke t
             if runner.session is not None:
                 target = runner.session / "gui-logs"
                 target.mkdir(exist_ok=True)
-                shutil.copy2(runner.log_path, target / runner.log_path.name)
-                set_session(runner.session)
-            state["quick_run"] = f"{outcome.verdict} {dt.datetime.now():%H:%M}"
+                if runner.log_path.parent.resolve() != target.resolve():
+                    shutil.copy2(runner.log_path, target / runner.log_path.name)
+                if runner.session != state["session"]:
+                    set_session(runner.session)
+            answered = runner.checks.get("answers", {}).get("ok") is True
+            # a repeat reuses the session only when its probe passed and nothing ran in it
+            state["check_session"] = (runner.session if runner.attempt is None and answered
+                                      else None)
+            repeat = (state["checking"] and runner.attempt is None and bool(runner.checks)
+                      and outcome.verdict in ("REFUSED", "CANCELLED") and not outcome.alarm)
+            state["checking"] = repeat
             why = refusal_text(runner.lines)
-            quick_result.configure(
-                text=(f"Quick start: {outcome.verdict}" + (f": {why}" if why else "")
-                      + ("\nFix what is named above, then press Re-check."
-                         if outcome.verdict == "REFUSED" else "")),
-                fg=colours["valid"] if outcome.verdict in ("PASS", "DONE") else colours["bad"])
+            if runner.attempt is not None:
+                text = quick_end_text(outcome, runner.attempt, head_off_reason(runner.lines))
+            elif repeat:
+                text = (f"Not ready yet (round {state['rounds']}): fix the red lines below; the "
+                        f"check repeats in {REPEAT_S:g} s.")
+                state["repeat"] = root.after(int(REPEAT_S * 1000), repeat_check)
+            elif outcome.verdict == "STOPPED":
+                text = "Checking stopped. Press Check robot and stream to start again."
+            else:
+                text = f"Quick start: {outcome.verdict}" + (f": {why}" if why else "")
+            quick_result.configure(text=text, fg=colours["valid"] if outcome.verdict in (
+                "PASS", "DONE") else colours["incomplete"] if repeat else colours["bad"])
         if key == "preflight":
             state["preflight"] = f"{outcome.verdict} {dt.datetime.now():%H:%M}"
         if key == "replay":
@@ -1638,11 +2016,23 @@ def run_gui() -> int:  # pragma: no cover - exercised by hand and by the smoke t
             for kind, item in runner.poll():
                 if kind == "event" and item.get("event") == "live":
                     show_live(item)
+                    if runner.step == "quick":
+                        quick_result.configure(text=quick_status_text(
+                            item, head_off_reason(runner.lines)), fg=colours[
+                                LIVE_COLOURS.get(str(item.get("state")), "bad")])
+                if kind == "event" and item.get("event") == "checks":
+                    state["checks"].update(runner.checks)
+                    show_checks()
                 if kind == "line":
                     write(("[mirror] " + item) if slot == "mirror" else item,
                           "mirror" if slot == "mirror" else "")
             if slot == "step":
                 show_prompt(runner)
+                if runner.step == "quick" and quick_go_prompt() is not None and \
+                        str(go_button["state"]) == "disabled":
+                    quick_result.configure(text="Both checks passed. Read the warnings, then Go.",
+                                           fg=colours["valid"])
+                    refresh()
             if runner.finished:
                 finish(runner, slot)
         sender = state["sender"]
@@ -1658,6 +2048,8 @@ def run_gui() -> int:  # pragma: no cover - exercised by hand and by the smoke t
         root.after(100, tick)
 
     def on_close() -> None:
+        state["checking"] = False
+        cancel_repeat()
         if state["alarm"]:
             messagebox.showwarning("Alarm open", "Acknowledge the red alarm first.")
             return

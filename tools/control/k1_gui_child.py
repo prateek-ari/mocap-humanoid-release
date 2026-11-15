@@ -11,7 +11,8 @@ release path) and stdin on a pipe.  What this wrapper adds:
 - structured prompts: every question becomes one ``@@K1GUI`` event line with an
   id, and only a stdin line ``<id><TAB><answer>`` answers it;
 - ``session`` and ``attempt`` events, so the GUI binds each run to its evidence;
-- ``live`` status events from the live bridge (rate, source age, state, release);
+- ``live`` status events from the live bridge (rate, source age, state, release) and
+  ``checks`` events (the quick start's auto-checks, one line each);
 - on the fake robot only: ``rpc`` events, and test hooks (``K1_GUI_TEST_*``).
 """
 
@@ -132,6 +133,7 @@ def install_hooks(tool_name: str, argv: list[str]) -> None:
         from tools.control import k1_live_bridge
 
         k1_live_bridge.STATUS = lambda fields: emit("live", **fields)
+        k1_live_bridge.CHECKS = lambda items: emit("checks", items=items)
 
     if tool_name in ("commission", "live", "replay"):  # the bridges ask through k1_commission
         from tools.control import k1_commission as tool

@@ -169,8 +169,23 @@ REAL_TRANSPORT: Callable[[Mapping[str, Any]], Any] | None = _isolated_transport
 #: child sets it to emit ``@@K1GUI {"event": "live", ...}``); ``None`` on the command line.
 STATUS: Callable[[dict[str, Any]], None] | None = None
 STATUS_EVERY_S = 0.2
+#: Receives the auto-checks line by line (``{"key", "ok", "text"}``; ``ok`` None = not
+#: checked yet): the window's checklist (the GUI child emits ``checks`` events); ``None`` on
+#: the command line, which prints the same results as text.
+CHECKS: Callable[[list[dict[str, Any]]], None] | None = None
+CHECKS_EVERY_S = 0.5
 PHASE_STATE = {"aligning": "aligning", "realign": "aligning", "following": "following",
                "hold": "lag-hold"}
+
+
+def report_checks(*items: tuple[str, bool | None, str]) -> None:
+    """Send check lines ``(key, ok, text)`` to the window; never stops a check."""
+    if CHECKS is None:
+        return
+    try:
+        CHECKS([{"key": key, "ok": ok, "text": text} for key, ok, text in items])
+    except OSError:
+        pass
 
 
 def stage_gate() -> Any:
@@ -693,6 +708,7 @@ class LiveRun:
                   "enabled": bool(packet.enabled) if packet else None,
                   "worst_joint": worst, "worst_gap_rad": round(gaps[worst], 3) if gaps and worst else None,
                   "following_s": round(self.result.follow_s, 1), "time_limit_s": self.plan.time_limit_s,
+                  "lag_holds": self.result.lag_holds,
                   "bridge": self.bridge.state, "release": release_state(self.rig),
                   "head": self.head.status if self.head is not None
                   else ("disabled" if not self.plan.head else "none"), **extra}
@@ -977,13 +993,20 @@ def quick_session(args: argparse.Namespace) -> Any:
     root = Path(args.root)
     before = set(root.iterdir()) if root.is_dir() else set()
     print("Auto-check 1 (robot): probe, read-only", flush=True)
-    code = commission.run_probe(argparse.Namespace(
-        transport=args.transport, net=args.net, domain_id=args.domain_id, session=None, root=root,
-        model=args.model, seconds=QUICK_PROBE_S if args.transport == "booster" else None,
-        attested_robot_id=args.attested_robot_id, firmware=args.firmware))
+    report_checks(("answers", None, "probing the robot (read-only)..."))
+    try:
+        code = commission.run_probe(argparse.Namespace(
+            transport=args.transport, net=args.net, domain_id=args.domain_id, session=None,
+            root=root, model=args.model,
+            seconds=QUICK_PROBE_S if args.transport == "booster" else None,
+            attested_robot_id=args.attested_robot_id, firmware=args.firmware))
+    except (commission.CommissionError, K1BridgeError) as exc:
+        report_checks(("answers", False, f"the probe failed: {exc}"))
+        raise
     made = [path for path in set(root.iterdir()) - before if (path / "session.json").is_file()] \
         if root.is_dir() else []
     if code != 0 or len(made) != 1:
+        report_checks(("answers", False, "the probe did not pass (its lines are in the log)"))
         raise commission.CommissionError("auto-check 1 (robot) failed: the probe did not pass "
                                          "(see its checks above); fix it, then check again")
     print(f"Auto-check 1 (robot): probe PASS, session {made[0]} (the quick start goes on; "
@@ -1063,13 +1086,58 @@ def check_stream(run: LiveRun) -> str | None:
     """Auto-check 2 (read-only): the coarse gate's conditions once, within ``STREAM_CHECK_S``
     (fresh, calibrated, tracking on, model, stream clock, arm gap)."""
     start = run.rig.clock()
+    shown = -math.inf
     while True:
         run.rig.sleeper(CONTROL_DT)
         now = run.rig.clock()
         run.pump(now)
-        problem, _gap = run.gate_problem(now)
-        if problem is None or now - start >= STREAM_CHECK_S:
+        try:
+            problem, _gap = run.gate_problem(now)
+        except K1BridgeError:  # the stream clock (rule 3): show the line, then refuse
+            report_checks(*stream_items(run, None))
+            raise
+        done = problem is None or now - start >= STREAM_CHECK_S
+        if done or now - shown >= CHECKS_EVERY_S:
+            shown = now
+            report_checks(*stream_items(run, problem))
+        if done:
             return problem
+
+
+def stream_items(run: LiveRun, problem: str | None) -> list[tuple[str, bool | None, str]]:
+    """Auto-check 2 as checklist lines, from the receiver and the gaps ``gate_problem`` just
+    measured (display only: ``gate_problem`` decides)."""
+    view = run.receiver.view(run.rig.clock())
+    packet = view.packet
+    wrong_model = run.receiver.drops.get("model_or_joint_order", 0)
+    if packet is None:
+        sending = (False, "nothing received" + (f" ({wrong_model} packets of another model "
+                                               "dropped)" if wrong_model else ""))
+    elif problem == "stream stale":
+        sending = (False, "packets arrive, but the motion is frozen or late")
+    else:
+        sending = (True, "fresh")
+    model = ((True, "the stream's model is this K1 model") if packet is not None
+             else (False, "the stream is for another robot model or joint order")
+             if wrong_model else (None, "waits for the stream"))
+    clock = ((False, view.clock_error) if view.clock_error
+             else (True, "same clock") if packet is not None else (None, "waits for the stream"))
+    calibrated = ((None, "waits for the stream") if packet is None
+                  else (True, f"calibration {packet.calibration_epoch}")
+                  if packet.calibration_epoch else (False, "not calibrated"))
+    tracking = ((None, "waits for the stream") if packet is None
+                else (True, "on") if packet.enabled else (False, "off"))
+    gaps = run.last_gaps
+    arms: tuple[bool | None, str]
+    if gaps:
+        worst = max(gaps, key=lambda name: gaps[name])
+        arms = (gaps[worst] < COARSE_GAP_RAD, f"gap {gaps[worst]:.2f} rad at {worst} "
+                f"(limit {COARSE_GAP_RAD:g} rad)")
+    else:
+        arms = (None, "no joint state" if problem == "no joint state"
+                else "waits for the lines above")
+    return [("sending", *sending), ("calibrated", *calibrated), ("tracking", *tracking),
+            ("model", *model), ("clock", *clock), ("arms", *arms)]
 
 
 def go_summary(meta: Mapping[str, Any], args: argparse.Namespace, plan: Plan,
@@ -1119,20 +1187,27 @@ def attempt(session: Any, rig: Any, receiver: StreamReceiver, args: argparse.Nam
             pump: Callable[[float], None] | None = None) -> int:
     """Auto-checks, Go, attempt file, gate wait, takeover, follow, release, verdict."""
     meta = session.meta
-    wait_for_readings(rig.transport, READINGS_TIMEOUT_S)
+    try:
+        wait_for_readings(rig.transport, READINGS_TIMEOUT_S)
+    except K1BridgeError as exc:
+        report_checks(("answers", False, str(exc)))
+        raise
     problems = commission.identity_problems(rig, meta, args.attested_robot_id)
     if problems:
+        report_checks(("answers", False, "another robot than this session's: " + "; ".join(problems)))
         raise commission.CommissionError("this is not the session's robot:\n  " + "\n  ".join(problems))
     problems = robot_problems(rig, config)
-    if problems:
-        raise commission.CommissionError("auto-check 1 (robot) failed; fix this, then check "
-                                         "again:\n  " + "\n  ".join(problems))
-    print("Auto-check 1 (robot): PASS", flush=True)
+    report_checks(("answers", True, f"robot {meta.get('serial')} answers"),
+                  ("robot", not problems, "; ".join(problems) or "walking, not fallen, joints in range"))
     strap_clear = args.stage != "hoist" or not args.strap_not_clear
     plan = Plan(args.stage, args.drill, args.time_limit, strap_clear, config,
                 head=not args.no_head)
     run = LiveRun(rig, receiver, plan, pump=pump)
-    problem = check_stream(run)
+    problem = check_stream(run)  # read-only, also after a failed check 1: the window shows both
+    if problems:
+        raise commission.CommissionError("auto-check 1 (robot) failed; fix this, then check "
+                                         "again:\n  " + "\n  ".join(problems))
+    print("Auto-check 1 (robot): PASS", flush=True)
     if problem:
         raise commission.CommissionError(f"auto-check 2 (stream) failed: {problem}; fix it "
                                          "(live tool, Calibrate, Tracking on, arms down), then "
