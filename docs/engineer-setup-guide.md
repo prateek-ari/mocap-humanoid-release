@@ -160,10 +160,11 @@ With Xsens still streaming, open **06 Check the stream** and click **Run 30-seco
 
 Open **07 Live simulation**. It shows the robot and height from your session.
 
-1. Optional: tick **Auto-calibrate after** (for example 5 s) if the performer works alone, and **Record video** to save an MP4. With the Booster K1 on the Ubuntu PC, **Send the arms to the K1 window** (`udp://127.0.0.1:47011`) also sends the robot's arm motion to step 13 · Live arms of the K1 test window (see step 13). Leave it off unless you run that step.
+1. Optional: tick **Auto-calibrate after** (for example 5 s) if the performer works alone, and **Record video** to save an MP4. With the Booster K1 on the Ubuntu PC, **Send the arms to the K1 window** (`udp://127.0.0.1:47011`) also sends the robot's arm motion to step 13 · Live arms of the K1 test window (see step 13). It is ticked by default once the K1 test tools are installed; untick it if you do not run that step.
 2. Click **Start live simulation**. A MuJoCo window opens on this PC.
 3. Start or resume Xsens streaming within 60 seconds. The log shows `Receiving Xsens body frames`.
-4. **Calibrate once per session:** the performer stands still, arms relaxed at the sides, and someone clicks the MuJoCo window and presses **N** (or waits for the auto-calibration). This puts the robot's feet on the floor (and, for the T1, calibrates arm orientation).
+4. **Calibrate once per session:** the performer stands still, arms relaxed at the sides, looking straight ahead. Click **Calibrate** under the Start buttons (or click the MuJoCo window and press **N**, or wait for the auto-calibration). The **Calibrated** lamp turns green. This puts the robot's feet on the floor (and, for the T1, calibrates arm orientation). With **Send the arms to the K1 window** ticked, the K1 head also takes its zero here. A new Calibrate stops a running K1 arm run; start it again in the K1 window.
+   **Tracking on / Tracking off** next to it turns arm and waist tracking on or off; the **Tracking on** lamp shows the state and why tracking is off. The buttons unlock with the first Xsens frame; if one fails, the message under it says why.
 5. Click **Stop** when you are done. A recorded video is copied into the session folder and listed under **Recorded videos**, where you can play it in the browser.
 
 ![Step 07: the live simulation running with auto-calibration; MuJoCo window keys below](engineer-guide-assets/setup-07-live.png)
@@ -185,7 +186,7 @@ source session.env
 bash docker/gmr-live/run-compare.sh --calibrate-after 5
 ```
 
-Keys in the MuJoCo window (click it first):
+The same actions as keys in the MuJoCo window (click it first):
 
 - **Space** turns arm and waist tracking on or off.
 - **R** resets from the current pose after a stream drop.
@@ -292,9 +293,18 @@ This step is for the day the Booster K1 is on site. It moves a real robot, so fo
 2. **PC:** an Ubuntu 22.04 or 24.04 PC wired to the robot, address `192.168.10.10/24`. The Windows app cannot drive the robot (the Booster SDK is Linux-only).
 3. **Robot facts first:** check the robot's IP address (Booster default `192.168.10.102`), firmware (the SDK expects 1.8.0), DDS domain, serial number and the remote's emergency stop against Booster's manual. The guide's table "What to find out about the robot first" lists each one.
 4. **Install:** in the Setup console open **13 Real K1**. It shows the Booster SDK, Tk, the GMR runtime and the K1 model as FOUND or MISSING. Click **Install K1 test tools** (no password needed; safe to run again; it fails with a clear message while a K1 window is open). If Tk is MISSING, click **Install Tk** and enter your password. (Terminal: `bash tools/setup/install.sh recorded --with-booster`.)
-5. **Practise first:** click **Open K1 test window** in step 13, or open **K1 Hardware Tests** from the applications menu (terminal: `.venv/bin/python tools/control/k1_commission_gui.py`). Only one window opens at a time; shutting down the Setup console leaves it open. Keep transport `fake`; the K1 model is filled in from `~/mocap-runtime/GMR/assets/booster_k1/K1_serial.xml` (else **Browse...**). Click through the steps from **1 · Preflight**. Without a screen, use the script: `.venv/bin/python tools/control/k1_commission.py probe --model <K1_serial.xml>`, then follow the **Next:** line each step prints.
-6. **On the robot:** the same steps with transport `booster` and `--net 192.168.10.10` (in the window: **Transport** and **PC interface or IP**): probe, mirror, zero-check, quick-release, hold, balance, command-loss, signs, gains, record. Each step shows its plan and the checklist and waits for **All of the above is true: start** before the robot moves, and stops and releases the arms when a check fails. The red **STOP step** button is Ctrl-C to the script; the remote (LT+BACK) is the real stop. Then **12 · First real replay** and **13 · Live arms** (the arms follow the suit: tick **Send the arms to the K1 window** in step 07 and start the live simulation first). Each stays locked until the stage before it passed for this robot; the window's **Stage ladder** shows which stages passed and why a stage is locked.
-7. **Status:** the window's step list shows which steps passed and why the others are not valid (terminal: `.venv/bin/python tools/control/k1_commission.py status --session <folder>`). **Zip session for the developers** packs the session to send.
+
+**Short path: live arms and head.** Practise it first with transport `fake` (the practice robot), then do the same with transport `booster` on the robot.
+
+1. In the Setup console, step **07**: tick **Send the arms to the K1 window** and click **Start live simulation**. When the performer stands still, arms down, looking straight ahead, click **Calibrate**. The K1 head takes its zero here.
+2. In step **13**, click **Open K1 test window** (or open **K1 Hardware Tests** from the applications menu; terminal: `.venv/bin/python tools/control/k1_commission_gui.py`). Only one window opens at a time; shutting down the Setup console leaves it open. It opens on the first tab, **Quick start**. The fields fill themselves from the last run; on the robot, set **Transport** `booster` and **PC interface or IP** `192.168.10.10`.
+3. Click **Check robot and stream**. A numbered checklist shows a lamp, the result and **what to do** on each line: the PC on the robot's network, the robot answering and standing in walking mode, the live tool sending, calibrated, tracking on, model, clock, and the performer's arms near the robot's. The check repeats by itself, so fix one line and watch its lamp change. It never moves the robot.
+4. When both checks pass, click **Go**. Warnings beside it do not block. The arms follow the suit; the head follows too while **Head follows** is ticked. The status line shows what the run is doing. **STOP** stays visible; the remote (LT+BACK) is the real stop.
+5. At the end the window shows PASS, or why it stopped and what to do next. A new **Calibrate** in step 07 stops a running arm run; start it again in the K1 window.
+
+**Advanced tests (optional).** The thirteen steps (probe, mirror, zero-check, quick-release, hold, balance, command-loss, signs, gains, record, first real replay, live arms) are under **Advanced tests**, unchanged. Click through them from **1 · Preflight**. Each step shows its plan and the checklist and waits for **All of the above is true: start** before the robot moves, and stops and releases the arms when a check fails. The red **STOP step** button is Ctrl-C to the script. The **Stage ladder** shows which stages passed and why a stage is locked. Without a screen, use the script: `.venv/bin/python tools/control/k1_commission.py probe --model <K1_serial.xml>`, then follow the **Next:** line each step prints.
+
+**Status:** the window's step list shows which steps passed and why the others are not valid (terminal: `.venv/bin/python tools/control/k1_commission.py status --session <folder>`). **Zip session for the developers** packs the session to send.
 
 ![Step 13: the K1 test tools found on this PC, and the K1 test window opened](engineer-guide-assets/setup-13-k1.png)
 

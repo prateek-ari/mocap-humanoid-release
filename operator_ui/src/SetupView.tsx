@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
-import { AlertTriangle, BookOpen, Bot, Check, ChevronDown, Columns2, Copy, Download, FilePlus, FileSearch, Film, Play, Power, RefreshCw, Save, ShieldCheck, Square, Stethoscope, Video } from 'lucide-react'
+import { AlertTriangle, BookOpen, Bot, Check, ChevronDown, Columns2, Copy, Crosshair, Download, FilePlus, FileSearch, Film, Play, Power, RefreshCw, Save, ShieldCheck, Square, Stethoscope, Video } from 'lucide-react'
 import { Lamp } from './components'
 import {
   SESSION_FIELDS,
@@ -8,6 +8,7 @@ import {
   isLoopbackIp,
   normalizeField,
   tildePath,
+  type ControlCommand,
   type JobKind,
   type JobOptions,
   type JobSummary,
@@ -424,7 +425,10 @@ export function SetupView({ client, initial, hidden = false }: SetupViewProps) {
   const [autoCalibrate, setAutoCalibrate] = useState(false)
   const [calibrateAfter, setCalibrateAfter] = useState('5')
   const [liveVideo, setLiveVideo] = useState(false)
-  const [robotStream, setRobotStream] = useState(false)
+  // null until the operator ticks or unticks it: then the default follows the K1 tools.
+  const [robotStream, setRobotStream] = useState<boolean | null>(null)
+  const [controlPending, setControlPending] = useState<ControlCommand | null>(null)
+  const [controlError, setControlError] = useState<string | null>(null)
   const [renderMotion, setRenderMotion] = useState<'preview' | 'npose'>('preview')
   const [playing, setPlaying] = useState<string | null>(null)
   const [k1, setK1] = useState<K1Status | null>(null)
@@ -587,7 +591,7 @@ export function SetupView({ client, initial, hidden = false }: SetupViewProps) {
   // Check the K1 tools when the step opens and each time an install ends.
   const k1InstallState = jobs.find((job) => job.kind === 'k1_install')?.state ?? null
   useEffect(() => {
-    if (step !== 'k1' || !setup.desktop_tools || k1InstallState === 'running') return
+    if ((step !== 'k1' && step !== 'live') || !setup.desktop_tools || k1InstallState === 'running') return
     let active = true
     client.getK1().then((status) => {
       if (!active || !aliveRef.current) return
@@ -1159,6 +1163,23 @@ export function SetupView({ client, initial, hidden = false }: SetupViewProps) {
     const liveRunning = liveJob?.state === 'running'
     // The K1 window (Booster SDK) runs on the Ubuntu PC only.
     const streamable = robotId === 'booster_k1' && !windows
+    const sendArms = streamable && (robotStream ?? k1?.installed === true)
+    const live = liveRunning && liveJob?.kind === 'live' ? liveJob.live ?? null : null
+    async function control(command: ControlCommand) {
+      if (!liveJob || !liveRunning) return
+      setControlError(null)
+      setControlPending(command)
+      try {
+        await client.controlJob(liveJob.id, command)
+      } catch (reason) {
+        if (!aliveRef.current) return
+        setControlError(reason instanceof SetupApiError && reason.status === 409
+          ? 'The simulation is no longer running or reading commands.'
+          : errorMessage(reason, 'The simulation did not accept the command.'))
+      } finally {
+        if (aliveRef.current) setControlPending(null)
+      }
+    }
     return (
       <>
         <fieldset className="group">
@@ -1181,14 +1202,14 @@ export function SetupView({ client, initial, hidden = false }: SetupViewProps) {
             </label>
             {streamable && (
               <label className="check-option">
-                <input type="checkbox" checked={robotStream} onChange={(event) => setRobotStream(event.target.checked)} />
-                <span>Send the arms to the K1 window <small className="mono">{ROBOT_STREAM_URL}</small></span>
+                <input type="checkbox" checked={sendArms} onChange={(event) => setRobotStream(event.target.checked)} />
+                <span>Send the arms to the K1 window <small>The K1 window's Live arms step moves the robot from this simulation.</small> <small className="mono">{ROBOT_STREAM_URL}</small></span>
               </label>
             )}
           </div>
           {calibrateInvalid && <span className="field-error" role="alert">Use 0.5 to 60 seconds.</span>}
           <div className="setup-actions">
-            {runKey('live', 'live', 'Start live simulation', <Play aria-hidden="true" />, { calibrate_after_s: autoCalibrate ? calibrate : null, record_video: liveVideo, ...(streamable ? { robot_stream: robotStream } : {}) }, true, calibrateInvalid || noDisplay)}
+            {runKey('live', 'live', 'Start live simulation', <Play aria-hidden="true" />, { calibrate_after_s: autoCalibrate ? calibrate : null, record_video: liveVideo, ...(streamable ? { robot_stream: sendArms } : {}) }, true, calibrateInvalid || noDisplay)}
             {setup.desktop_tools && runKey('live', 'compare', 'Start G1 + T1 side by side', <Columns2 aria-hidden="true" />, { calibrate_after_s: autoCalibrate ? calibrate : null }, false, calibrateInvalid || noDisplay)}
             {liveRunning && liveJob && (
               <button type="button" className="panel-key setup-run is-stop" disabled={isStopping(liveJob.id)} onClick={() => void stopJob(liveJob)}>
@@ -1197,12 +1218,37 @@ export function SetupView({ client, initial, hidden = false }: SetupViewProps) {
             )}
           </div>
           {stepError}{stepNotice}
+          {liveRunning && liveJob?.kind === 'live' && (
+            <>
+              <div className="live-tracking">
+                <span className={`live-flag ${live?.calibrated ? 'is-on' : ''}`}>
+                  <Lamp state={live?.calibrated ? 'passed' : 'off'} />
+                  <span>Calibrated <strong>{live ? live.calibrated ? 'yes' : 'no' : '—'}</strong></span>
+                </span>
+                <span className={`live-flag ${live?.enabled ? 'is-on' : ''}`}>
+                  <Lamp state={live?.enabled ? 'active' : 'off'} />
+                  <span>Tracking on <strong>{live ? live.enabled ? 'yes' : 'no' : '—'}</strong>{live?.reason ? <small className="mono">{live.reason}</small> : null}</span>
+                </span>
+              </div>
+              {sendArms && <p className="live-calibrate-note">Calibrate with the performer standing still, arms down, looking straight ahead: the K1 head takes its zero here. A new Calibrate stops a running K1 arm run; start it again in the K1 window.</p>}
+              <div className="live-keys" role="group" aria-label="Simulation controls">
+                <button type="button" className="panel-key" disabled={controlPending !== null || !live} onClick={() => void control('calibrate')}>
+                  {controlPending === 'calibrate' ? <RefreshCw className="spin" aria-hidden="true" /> : <Crosshair aria-hidden="true" />}Calibrate<kbd>N</kbd>
+                </button>
+                <button type="button" className="panel-key" aria-pressed={live?.enabled ?? false} disabled={controlPending !== null || !live} onClick={() => void control('toggle_tracking')}>
+                  {controlPending === 'toggle_tracking' ? <RefreshCw className="spin" aria-hidden="true" /> : <Power aria-hidden="true" />}{live?.enabled ? 'Tracking off' : 'Tracking on'}<kbd>Space</kbd>
+                </button>
+              </div>
+              {!live && <p className="group-note">Calibrate and Tracking unlock with the first Xsens frame.</p>}
+              {controlError && <span className="field-error" role="alert">{controlError}</span>}
+            </>
+          )}
           {consoleFor(stepJob, undefined, !(liveRunning && stepJob?.id === liveJob?.id))}
         </fieldset>
         <div className="live-columns">
           <fieldset className="group">
             <legend className="silk">MuJoCo window keys</legend>
-            <p className="group-note">Click the MuJoCo window first. Calibrate once per session: the performer stands still, arms relaxed at the sides.</p>
+            <p className="group-note">Use the Calibrate and Tracking buttons above, or click the MuJoCo window first and press a key. Calibrate once per session: the performer stands still, arms relaxed at the sides.</p>
             <dl className="key-sheet">
               <div><dt><kbd>N</kbd></dt><dd>Calibrate. Stand still in the neutral pose first.</dd></div>
               <div><dt><kbd>Space</kbd></dt><dd>Arm and waist tracking on or off.</dd></div>

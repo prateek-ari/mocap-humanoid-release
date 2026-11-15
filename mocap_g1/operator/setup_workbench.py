@@ -155,7 +155,7 @@ PRIVILEGED_ACTIONS = ("firewall", "install_tk")
 PKEXEC_CANCELLED = 126
 PRIVILEGED_TIMEOUT_S = 600
 UFW = "/usr/sbin/ufw"
-#: Commands a running Windows live simulation accepts on stdin (``--control-stdin``).
+#: Commands a running live simulation accepts on stdin (``--control-stdin``).
 CONTROL_COMMANDS = ("calibrate", "toggle_tracking", "rearm")
 #: The machine status line live_g1_sim.py prints: ``STATUS {json LiveStatus}``.
 STATUS_PREFIX = "STATUS "
@@ -658,7 +658,7 @@ class _Job:
     log_handle: Any = None
     #: The latest LiveStatus from a live job's ``STATUS {json}`` lines.
     live_status: dict[str, Any] | None = None
-    #: A Windows live job's stdin (``--control-stdin``); written under ``lock``.
+    #: A live job's stdin (``--control-stdin``); written under ``lock``.
     control: Any = None
     lock: threading.Lock = field(default_factory=threading.Lock)
 
@@ -1683,8 +1683,8 @@ class SetupWorkbench:
     def control_job(self, job_id: str, command: Any) -> dict[str, Any]:
         """Send ``command`` (calibrate, toggle_tracking, rearm) to a running live simulation.
 
-        The command is written as one line to the job's stdin (Windows live jobs
-        run ``live_g1_sim.py --control-stdin``).  400 for an unknown command,
+        The command is written as one line to the job's stdin (live jobs run
+        ``live_g1_sim.py --control-stdin``, on Ubuntu through docker run -i).  400 for an unknown command,
         409 unless the job is a running live job that still reads its stdin.
         """
 
@@ -1814,7 +1814,7 @@ class SetupWorkbench:
         """Run ``argv`` in its own process group, streaming output into the job log.
 
         ``control=True`` gives the process a stdin pipe that :meth:`control_job`
-        writes commands to (a Windows live simulation with ``--control-stdin``).
+        writes commands to (a live simulation with ``--control-stdin``).
         """
 
         job.append("$ " + self._display_command(argv))
@@ -1966,8 +1966,9 @@ class SetupWorkbench:
                   env: Mapping[str, str], *, video: Path | None = None) -> list[str]:
         """The live viewer command: Docker on Linux, the runtime venv on Windows.
 
-        On Windows the viewer takes control commands on stdin and binds
-        127.0.0.1 when Xsens is on this PC.
+        Both take control commands on stdin (``--control-stdin``; docker run -i
+        passes the pipe through).  On Windows the viewer binds 127.0.0.1 when
+        Xsens is on this PC.
         """
 
         if self.windows:
@@ -1981,7 +1982,8 @@ class SetupWorkbench:
                 "--control-stdin",
             ]
         else:
-            argv = [str(self.repo_root / "tools" / "xsens" / "live_operator.sh"), "gmr"]
+            argv = [str(self.repo_root / "tools" / "xsens" / "live_operator.sh"), "gmr",
+                    "--control-stdin"]
         argv += ["--robot", session["robot"],
                  "--human-height", _format_number(session["human_height_m"])]
         if options["calibrate_after_s"] is not None:
@@ -2002,7 +2004,7 @@ class SetupWorkbench:
             self._argv("live", session, options,
                        lambda: self.live_argv(session, options, env, video=video)),
             env,
-            control=self.windows,
+            control=True,
         )
         if options["record_video"]:
             try:

@@ -119,7 +119,9 @@ class FakeSetupClient extends SetupClient {
   readonly k1Opens = vi.fn<() => Promise<ActionResult<K1OpenOutcome>>>(() => Promise.resolve({ outcome: 'opened', message: 'The K1 test window is open on this desktop.' }))
   readonly admins = vi.fn<(action: string) => Promise<ActionResult<PrivilegedOutcome>>>(() => Promise.resolve({ outcome: 'done', message: 'Firewall rule added.' }))
   readonly shutdowns = vi.fn(() => Promise.resolve())
+  readonly controls = vi.fn<(id: string, command: string) => Promise<void>>(() => Promise.resolve())
   override getK1() { return this.k1Reads() }
+  override controlJob(id: string, command: 'calibrate' | 'toggle_tracking' | 'rearm') { return this.controls(id, command) }
   override openK1() { return this.k1Opens() }
   override runPrivileged(action: 'firewall' | 'install_tk') { return this.admins(action) }
   override shutdown() { return this.shutdowns() }
@@ -760,12 +762,46 @@ describe('Setup desktop tools (Linux checkout console)', () => {
     cleanup()
     setupClient = await renderApp(desktop({ session: { ...values, robot: 'booster_k1' } }))
     goTo('live')
-    const box = screen.getByRole('checkbox', { name: /Send the arms to the K1 window/ })
+    await flush()
+    // K1 tools installed: ticked by default.
+    const box = screen.getByRole<HTMLInputElement>('checkbox', { name: /Send the arms to the K1 window/ })
+    expect(box.checked).toBe(true)
     expect(screen.getByText('udp://127.0.0.1:47011')).toBeTruthy()
-    fireEvent.click(box)
     fireEvent.click(screen.getByRole('button', { name: 'Start live simulation' }))
     await flush()
-    expect(setupClient.starts).toHaveBeenCalledWith('live', { calibrate_after_s: null, record_video: false, robot_stream: true })
+    expect(setupClient.starts).toHaveBeenLastCalledWith('live', { calibrate_after_s: null, record_video: false, robot_stream: true })
+    fireEvent.click(box)
+    expect(box.checked).toBe(false)
+    cleanup()
+    setupClient = new FakeSetupClient(desktop({ session: { ...values, robot: 'booster_k1' } }))
+    setupClient.k1Reads.mockResolvedValue(k1Status({ installed: false }))
+    window.history.replaceState(null, '', '#setup/live')
+    render(<App client={new FakeClient()} setupClient={setupClient} />)
+    await flush()
+    expect((screen.getByRole<HTMLInputElement>('checkbox', { name: /Send the arms to the K1 window/ })).checked).toBe(false)
+  })
+
+  it('calibrates and toggles tracking of the running live simulation with buttons', async () => {
+    const live = { enabled: false, reason: 'waiting for calibration', fps: 60, frames: 120, drops: 0, failures: 0, calibrated: false }
+    const liveJob: JobSummary = { ...runningJob, kind: 'live', label: 'Live simulation', live }
+    const setupClient = new FakeSetupClient(desktop({ session: { ...values, robot: 'booster_k1' }, jobs: [liveJob] }))
+    setupClient.polls.mockResolvedValue({ job: liveJob, lines: [], next: 0 })
+    window.history.replaceState(null, '', '#setup/live')
+    render(<App client={new FakeClient()} setupClient={setupClient} />)
+    await flush()
+    await flush()
+    expect(screen.getByText(/the K1 head takes its zero here/)).toBeTruthy()
+    const flags = document.querySelector('.live-tracking')?.textContent
+    expect(flags).toContain('Calibrated no')
+    expect(flags).toContain('Tracking on no')
+    fireEvent.click(screen.getByRole('button', { name: /^Calibrate/ }))
+    await flush()
+    expect(setupClient.controls).toHaveBeenCalledWith(liveJob.id, 'calibrate')
+    setupClient.controls.mockRejectedValueOnce(new SetupApiError('The live simulation is no longer reading commands', 409, 'job_not_controllable'))
+    fireEvent.click(screen.getByRole('button', { name: /^Tracking on/ }))
+    await flush()
+    expect(setupClient.controls).toHaveBeenLastCalledWith(liveJob.id, 'toggle_tracking')
+    expect(screen.getByRole('alert').textContent).toContain('no longer running or reading commands')
   })
 
   it('starts G1 + T1 side by side with the auto-calibrate value', async () => {
