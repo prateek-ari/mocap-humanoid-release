@@ -557,6 +557,32 @@ approved pair.
 - Schema 1 records (written by hand before 2026-11-09) are refused; run the steps instead.
 - Changing the bridge's frame or lifecycle bumps `command_contract`; the steps must be redone.
 
+## Findings on the first real K1 (2026-11-15)
+
+The first real run (K1 Education, firmware 1.8.1.2, SDK 1.6.3, robot held by a person instead of a
+hoist at the owner's decision) passed S0 and S0r, and live arms followed the suit for about 35 s.
+What the robot taught us, and what the tools now do about it:
+
+- **Takeover settle.** For about 1-1.5 s after `UpperBodyCustomControl(true)` the K1 ignores arm
+  commands and refuses the release (code 400). The tools hold the takeover pose for 1.5 s before
+  any motion (commissioning `SETTLE_S`, replay and live arms `TAKEOVER_SETTLE_S`); quick-release
+  waits 0.5 s; the release is retried 4 times, 0.5 s apart. Every attempt file records each
+  takeover/release call's error text.
+- **Stiffness.** kp 20 / kd 1 could not follow multi-joint motion (the upper-arm twist lagged
+  0.3 rad). kp 40 / kd 2 tracks within 0.04-0.06 rad p95.
+- **Speed.** Gains level **L4** (0.45 rad at 1.0 rad/s, 3.0 rad/s^2) exists for live arms; at
+  0.6 rad/s a recorded performer outran the arms within 35 s. At 1.0 rad/s the right elbow still
+  hit the cap on fast moves (lag stop).
+- **Command loss.** With commands stopped for up to 1 s the arms drift only about 2 degrees.
+- **Takeover pose check.** `POSE_MATCH_RAD` is 0.10 rad (was 0.05): a hand-held robot sways.
+- **Signs** move 0.2 rad (0.1 was below the hold error at kp 20; 0.3 hit the torso in the contact
+  check).
+- **New steps.** `tpose` (demo: arms out to the T-pose and back) and `sysid` (measurements for
+  offline tuning: `--test sweep|steps|sine|poses`, one `--joint` at a time, at 1.0 rad/s).
+- **Flight recorder.** `tools/control/k1_flight_recorder.py [out_dir] [net]` saves every LowState
+  (about 500 Hz: all 22 motors' q, dq, ddq, tau_est, temperature, lost, and the IMU) to `.npz`
+  chunks, read-only. Its `t_monotonic` matches the live bridge log's `t`.
+
 ## After day one
 
 The robot moves in this release only through the stage ladder: S0 (steps 1-11, the acceptance

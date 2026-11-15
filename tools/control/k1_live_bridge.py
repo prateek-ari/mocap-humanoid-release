@@ -93,6 +93,8 @@ LAG_GAP_RAD, LAG_S, LAG_STOP_S = 0.35, 0.5, 3.0
 #: A stream that stays stale (late, never lost) holds the arms; this long, it stops them.
 LATE_STOP_S = 3.0
 AT_REST_RAD_S = 0.05
+#: Hold the takeover pose this long before aligning (commissioning SETTLE_S).
+TAKEOVER_SETTLE_S = 1.5
 GATE_WAIT_S = 60.0
 # S1 hoist: shoulder pitch and roll stay within this of rest until strap clearance is confirmed
 HOIST_SHOULDER_RAD = 0.6
@@ -533,7 +535,10 @@ class LiveRun:
             gaps = {name: abs(target[name] - last[name]) for name in ARMS}
             worst = max(gaps.values())
             enable = True
-            if phase in ("aligning", "realign"):
+            if phase == "aligning" and now - start < TAKEOVER_SETTLE_S:
+                # A K1 (1.8.1.2) ignores arm commands for about 1 s after the takeover: hold first.
+                command, aligned_since = dict(self.rest), None
+            elif phase in ("aligning", "realign"):
                 command = ramp(last, target, ALIGN_SPEED_RAD_S * CONTROL_DT)
                 aligned_since = (aligned_since or now) if worst < ALIGNED_RAD else None
                 needed = 0.0 if phase == "aligning" else REALIGNED_S

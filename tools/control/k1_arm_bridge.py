@@ -162,6 +162,8 @@ def resolve_model(model: Path | None) -> Path | None:
 
 
 READINGS_TIMEOUT_S = 2.0
+#: Hold the takeover pose this long before the replay starts (commissioning SETTLE_S).
+TAKEOVER_SETTLE_S = 1.5
 
 
 def wait_for_readings(transport: Any, timeout_s: float) -> None:
@@ -512,7 +514,7 @@ def main(argv: list[str] | None = None) -> int:
                         raise K1BridgeError("acceptance record does not match this robot:\n  "
                                             + "\n  ".join(mismatched))
                     wait_for_readings(transport, READINGS_TIMEOUT_S)
-                bridge.takeover()
+                hold = bridge.takeover().arm_positions()
             except K1BridgeError as exc:
                 print(f"ERROR: {exc}", file=sys.stderr)
                 problem = f"takeover:{exc}"
@@ -522,6 +524,14 @@ def main(argv: list[str] | None = None) -> int:
                     print(MANUAL_STOP, file=sys.stderr)
                     return 1
                 return 2
+            # A K1 (firmware 1.8.1.2) ignores arm commands for about 1 s after the takeover;
+            # hold the takeover pose first, as the commissioning steps do (SETTLE_S).
+            settle_end = clock() + TAKEOVER_SETTLE_S
+            while clock() < settle_end:
+                sleeper(control_dt)
+                bridge.step(hold, source_timestamp=clock(), now=clock())
+                if bridge.state != "tracking":
+                    break
             start = clock()
             if real:
                 ticks: Any = iter_dds_replay_ticks(steps=steps, control_dt=control_dt,

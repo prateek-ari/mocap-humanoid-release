@@ -94,15 +94,24 @@ CONTROL_DT = 0.02
 # Hard limits of the commissioning steps (fixed; not flags).
 SAFE = {"kp": 20.0, "kd": 1.0, "speed_max_rad_s": 0.3, "accel_max_rad_s2": 1.0}
 SETTLE_MAX_RAD = 0.10       # settling into the envelope margin, per joint
-POSE_MATCH_RAD = 0.05       # confirmed pose vs the pose after the takeover / settling
+POSE_MATCH_RAD = 0.10       # confirmed pose vs the pose after the takeover / settling
 SETTLE_S = 1.5
 HOLD_MAX_S = 60.0
 BALANCE_S = 30.0
-SIGNS_RAD = 0.10
+SIGNS_RAD = 0.20  # 11 deg (0.3 hit the torso in the contact check): 0.1 rad was below the 0.16 rad hold error seen on the K1 (2026-11-15)
+#: Shoulder pitch (lifting the arm) gets a bigger, visible move; the other joints keep SIGNS_RAD.
+SIGNS_LIFT_RAD = 0.60
+TPOSE_HOLD_S = 3.0
+
+
+def signs_amplitude(name: str) -> float:
+    return SIGNS_LIFT_RAD if name.endswith("Shoulder_Pitch") else SIGNS_RAD
 GAP_LEVELS = (0.1, 0.25, 0.5, 1.0)
 #: Slowest fall-state period the probe accepts. The real K1 (firmware 1.8.1.2) publishes it at
 #: 1 Hz; motion then treats a reading older than 3 periods as unknown (bridge_config).
 FALL_PERIOD_MAX_S = 1.5
+#: Quick-release waits this long after the takeover before the release (Booster waits 0.5 s).
+TAKEOVER_SETTLE_S = 0.5
 GAP_RECORD_MIN_S = 0.5
 GAP_DRIFT_RAD = 0.10
 GAP_START_DRIFT_RAD = 0.05
@@ -110,7 +119,8 @@ OVERRUN_S = 0.10
 POST_TAKEOVER_SIM_S = 0.10
 RELEASE_WATCH_S = 2.0
 #: Gains levels: (excursion rad, speed rad/s, acceleration rad/s^2).
-GAINS_LEVELS = {"L1": (0.10, 0.25, 1.0), "L2": (0.20, 0.45, 1.5), "L3": (0.30, 0.60, 2.0)}
+GAINS_LEVELS = {"L1": (0.10, 0.25, 1.0), "L2": (0.20, 0.45, 1.5), "L3": (0.30, 0.60, 2.0),
+                "L4": (0.45, 1.00, 3.0)}  # L4: live arms need more than 0.6 rad/s (2026-11-15)
 GAINS_MAX_ERROR_RAD, GAINS_P95_RAD = 0.2, 0.1
 SUSTAIN_TICKS = 5           # 0.1 s at 50 Hz
 COVERAGE = 0.9
@@ -342,13 +352,16 @@ class Rig:
 
         def timed(enable: bool) -> None:
             start = time.monotonic()
-            ok = False
+            ok, error = False, None
             try:
                 call(enable)
                 ok = True
+            except Exception as exc:
+                error = str(exc)
+                raise
             finally:
                 self.rpc.append({"enable": bool(enable), "ok": ok, "at_s": start,
-                                 "seconds": round(time.monotonic() - start, 4)})
+                                 "seconds": round(time.monotonic() - start, 4), "error": error})
 
         def counted(frame: Any) -> None:
             publish(frame)
@@ -502,12 +515,14 @@ def hold_plan(settled: Mapping[str, float], seconds: float) -> list[Segment]:
 def signs_plan(settled: Mapping[str, float]) -> list[Segment]:
     plan = [Segment("settle", settled, SETTLE_S)]
     for name in ARMS:
-        direction = room(settled, name, SIGNS_RAD)
+        amp = signs_amplitude(name)
+        direction = room(settled, name, amp)
         if not direction:
-            raise CommissionError(f"no room to move {name} by {SIGNS_RAD} rad from "
+            raise CommissionError(f"no room to move {name} by {amp} rad from "
                                   f"{settled[name]:.3f}")
-        plan += [Segment("out", {**settled, name: settled[name] + direction * SIGNS_RAD}, 2.0, name),
-                 Segment("back", settled, 1.5, name)]
+        seconds = max(2.0, amp / SAFE["speed_max_rad_s"] + 1.0)
+        plan += [Segment("out", {**settled, name: settled[name] + direction * amp}, seconds, name),
+                 Segment("back", settled, max(1.5, seconds - 0.5), name)]
     return plan
 
 
@@ -623,6 +638,7 @@ def run_motion(rig: Rig, config: K1BridgeConfig, build: Callable[[dict[str, floa
                 result.release_confirmed = bridge.state != "release_unconfirmed"
                 return result, plan
             if build is None:
+                rig.sleeper(TAKEOVER_SETTLE_S)  # as Booster's ArmController: settle, then release
                 bridge.abort("quick_release")
             else:
                 try:
@@ -1094,7 +1110,7 @@ def run_command_loss(args: argparse.Namespace) -> int:
 
 
 def run_signs(args: argparse.Namespace) -> int:
-    print("Signs test: each arm joint moves 0.1 rad (6 degrees) and back, one at a time, in this "
+    print(f"Signs test: each arm joint moves {SIGNS_RAD:.2f} rad ({math.degrees(SIGNS_RAD):.0f} degrees) and back, one at a time, in this "
           f"order: {', '.join(ARMS)}. Watch the robot and the mirror together.")
 
     def judge(result: MotionResult, plan: list[Segment]) -> Outcome:
@@ -1111,7 +1127,7 @@ def run_signs(args: argparse.Namespace) -> int:
                 base = window_mean(result.rows, index - 1, name)
                 change = out - base
                 good = (math.copysign(1, change) == math.copysign(1, commanded)
-                        and 0.5 * SIGNS_RAD <= abs(change) <= 1.5 * SIGNS_RAD)
+                        and 0.5 * abs(commanded) <= abs(change) <= 1.5 * abs(commanded))
                 joints[name] = {"commanded_rad": round(commanded, 3), "measured_rad": round(change, 3),
                                 "auto_ok": good}
                 print(f"  {name:24s} commanded {commanded:+.3f}  measured {change:+.3f}  "
@@ -1126,6 +1142,88 @@ def run_signs(args: argparse.Namespace) -> int:
 
     return motion_step(args, f"signs@{args.mode}", [f"hold@{args.mode}"], {},
                        motion_config(args.mode), signs_plan, judge, next_step="gains --level L1")
+
+
+def tpose_plan(settled: Mapping[str, float]) -> list[Segment]:
+    """Demo: arms out to the T-pose (every arm joint 0, elbows just inside their range end),
+    hold, and back."""
+    target = settle_targets({name: 0.0 for name in ARMS})
+    seconds = max(abs(target[n] - settled[n]) for n in ARMS) / SAFE["speed_max_rad_s"] + 1.5
+    return [Segment("settle", settled, SETTLE_S), Segment("out", target, seconds),
+            Segment("hold", target, TPOSE_HOLD_S), Segment("back", settled, seconds)]
+
+
+def run_tpose(args: argparse.Namespace) -> int:
+    def judge(result: MotionResult, _plan: list[Segment]) -> Outcome:
+        ok, reason = held(result)
+        seen = ok and ask_yes("Did the robot reach the T-pose and come back smoothly?")
+        verdict = "PASS" if ok and seen else "FAIL"
+        return Outcome(verdict, {"seen": seen, "tracking": tracking_summary(result.rows)},
+                       reason or (None if verdict == "PASS" else "operator: no"))
+
+    return motion_step(args, f"tpose@{args.mode}", [f"hold@{args.mode}"], {},
+                       motion_config(args.mode), tpose_plan, judge, next_step="gains --level L1")
+
+
+SYSID_TESTS = ("sweep", "steps", "sine", "poses")
+SYSID_SINE_HZ = (0.25, 0.5, 1.0, 1.5, 2.0)
+
+
+def sysid_plan(joint: str | None, test: str, amp: float) -> Any:
+    """System identification plans (2026-11-15): exact 50 Hz profiles through the envelope."""
+    def build(settled: Mapping[str, float]) -> list[Segment]:
+        plan = [Segment("settle", settled, SETTLE_S)]
+        if test == "poses":
+            for name, pose in (("tpose", {n: 0.0 for n in ARMS}),
+                               ("forward", {**settled, "ALeft_Shoulder_Pitch": -amp,
+                                            "ARight_Shoulder_Pitch": -amp})):
+                target = settle_targets(pose)
+                move = max(abs(target[n] - settled[n]) for n in ARMS) / SAFE["speed_max_rad_s"] + 1.0
+                plan += [Segment(name, target, move), Segment(name + "-hold", target, 4.0),
+                         Segment("back", settled, move), Segment("rest", settled, 1.5)]
+            return plan
+        assert joint is not None
+        lo, hi = LIMITS[joint].lower + MARGIN, LIMITS[joint].upper - MARGIN
+        base = settled[joint]
+        clip = lambda v: min(max(v, lo), hi)
+        def at(v: float, seconds: float, name: str) -> Segment:
+            return Segment(name, {**settled, joint: clip(v)}, seconds, joint)
+        def ramp(a: float, b: float, speed: float, name: str) -> list[Segment]:
+            n = max(1, int(abs(b - a) / speed / CONTROL_DT))
+            return [at(a + (b - a) * (i + 1) / n, CONTROL_DT, name) for i in range(n)]
+        if test == "sweep":
+            lo_t, hi_t = clip(base - amp), clip(base + amp)
+            plan += ramp(base, lo_t, 0.3, "sweep-down") + [at(lo_t, 1.0, "dwell-low")]
+            plan += ramp(lo_t, hi_t, 0.3, "sweep-up") + [at(hi_t, 1.0, "dwell-high")]
+            plan += ramp(hi_t, base, 0.3, "sweep-back") + [at(base, 1.0, "rest")]
+        elif test == "steps":
+            sign = room(settled, joint, amp) or 1
+            for size in (0.1, 0.25, amp):
+                plan += [at(base + sign * size, 1.5, f"step+{size:g}"), at(base, 1.5, f"step-{size:g}")]
+        elif test == "sine":
+            sign = room(settled, joint, 2 * amp) or 1
+            centre = base + sign * amp
+            plan += ramp(base, centre, 0.3, "to-centre") + [at(centre, 0.5, "centre")]
+            for hz in SYSID_SINE_HZ:
+                n = int(round(3 / hz / CONTROL_DT))
+                plan += [at(centre + amp * math.sin(2 * math.pi * hz * (i + 1) * CONTROL_DT),
+                            CONTROL_DT, f"sine-{hz:g}Hz") for i in range(n)]
+                plan += [at(centre, 0.5, "centre")]
+            plan += ramp(centre, base, 0.3, "back") + [at(base, 1.0, "rest")]
+        return plan
+    return build
+
+
+def run_sysid(args: argparse.Namespace) -> int:
+    def judge(result: MotionResult, _plan: list[Segment]) -> Outcome:
+        ok, reason = held(result)
+        return Outcome("PASS" if ok else "FAIL", {"tracking": tracking_summary(result.rows)}, reason)
+
+    key = f"sysid@{args.mode}@{args.test}@{args.joint or 'both'}@{args.amp:g}"
+    return motion_step(args, key, [f"hold@{args.mode}"], {"test": args.test, "joint": args.joint,
+                       "amp": args.amp}, motion_config(args.mode, kp=args.kp, kd=args.kd, speed_max_rad_s=1.0,
+                                     accel_max_rad_s2=3.0),
+                       sysid_plan(args.joint, args.test, args.amp), judge, next_step=None)
 
 
 def window_mean(rows: list[dict[str, Any]], segment: int, name: str, seconds: float = 0.5) -> float:
@@ -1525,6 +1623,13 @@ def build_parser() -> argparse.ArgumentParser:
     sub = add("command-loss", "commands stop for a short gap", mode=True)
     sub.add_argument("--gap", type=float, default=GAP_LEVELS[0], help=f"one of {GAP_LEVELS}")
     add("signs", "each arm joint 0.1 rad and back", mode=True)
+    add("tpose", "demo: arms out to the T-pose, hold, back", mode=True)
+    sub = add("sysid", "measure the arms: sweep, steps, sine or poses", mode=True)
+    sub.add_argument("--test", choices=SYSID_TESTS, required=True)
+    sub.add_argument("--joint", choices=ARMS, help="one arm joint (not for poses)")
+    sub.add_argument("--amp", type=float, default=0.5, help="rad (sweep/steps/sine/forward)")
+    sub.add_argument("--kp", type=float, default=40.0)
+    sub.add_argument("--kd", type=float, default=2.0)
     sub = add("gains", "tracking at one kp/kd pair and level", mode=True)
     sub.add_argument("--level", default="L1", help="L1, L2 or L3")
     sub.add_argument("--kp", type=float, default=SAFE["kp"])
@@ -1540,7 +1645,7 @@ def build_parser() -> argparse.ArgumentParser:
 STEPS: dict[str, Callable[[argparse.Namespace], int]] = {
     "preflight": preflight, "probe": run_probe, "status": run_status, "mirror": run_mirror,
     "zero-check": run_zero_check, "quick-release": run_quick_release, "hold": run_hold,
-    "balance": run_balance, "command-loss": run_command_loss, "signs": run_signs,
+    "balance": run_balance, "command-loss": run_command_loss, "signs": run_signs, "sysid": run_sysid, "tpose": run_tpose,
     "gains": run_gains, "record": run_record,
 }
 

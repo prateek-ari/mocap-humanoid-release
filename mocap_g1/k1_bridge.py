@@ -67,6 +67,9 @@ EXAMPLE_KP, EXAMPLE_KD = 60.0, 3.0
 #: ``RobotMode`` values of the SDK, and the fall state that allows motion.
 ROBOT_MODES = {"damping": 0, "prepare": 1, "walking": 2, "custom": 3, "soccer": 4}
 FALL_READY = 0
+#: Pause between release retries. A K1 on firmware 1.8.1.2 refused the release 6 ms after the
+#: takeover; Booster's ArmController waits 0.5 s after enabling and retries the release 1 s apart.
+RELEASE_RETRY_S = 0.5
 LEG_START = 10
 #: How far a measured arm joint may sit past its range end at takeover.
 RANGE_TOLERANCE_RAD = 0.02
@@ -495,7 +498,7 @@ class K1BridgeConfig:
     #: Wait for a joint state received after the takeover RPC returned.
     takeover_state_timeout_s: float = 0.50
     tracking_error_limit_rad: float = 0.30
-    release_attempts: int = 3
+    release_attempts: int = 4  # 0.5 s apart: a K1 (1.8.1.2) took 1.5 s after a takeover to accept the release
     #: Longest normal-stop deceleration before the release.
     stop_timeout_s: float = 3.0
 
@@ -710,7 +713,7 @@ class K1ArmBridge:
                 if exc.final:
                     break
                 if attempt + 1 < self.config.release_attempts:
-                    self.sleeper(0.2)
+                    self.sleeper(RELEASE_RETRY_S)
                 continue
             self.state = released_state
             return
