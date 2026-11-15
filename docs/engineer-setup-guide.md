@@ -308,6 +308,6 @@ This step is for the day the Booster K1 is on site. It moves a real robot, so fo
 
 ![Step 13: the K1 test tools found on this PC, and the K1 test window opened](engineer-guide-assets/setup-13-k1.png)
 
-![The K1 test window on the practice robot: before the takeover it shows the safety checklist and waits for "All of the above is true: start"](engineer-guide-assets/k1-test-window.png)
+![The K1 test window on the practice robot, Quick start tab: every check line is green and Go is ready](engineer-guide-assets/k1-test-window.png)
 
 If a step fails, read its **What to check** line and the guide's failure table before you run it again.
