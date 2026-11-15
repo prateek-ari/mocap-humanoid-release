@@ -21,8 +21,8 @@ One run = one attempt = one takeover/release cycle: wait for the coarse gate
 (stream fresh, calibrated, tracking on, worst arm gap < 0.4 rad for 1 s), take
 over, align at <= 0.2 rad/s until every gap < 0.1 rad, then follow.  A new
 session id, a new calibration epoch or tracking off stops the arms (decelerate,
-release): start again.  Lag policy: a gap > 0.35 rad for 0.5 s holds (bounded
-deceleration), then re-aligns; a hold longer than 3 s stops.  Stream loss holds
+release): start again.  Lag policy: a gap > 1.0 rad for 1.0 s holds (bounded
+deceleration), then re-aligns at up to 1.0 rad/s; a hold longer than 6 s stops.  Stream loss holds
 at 0.1 s and releases at the hard timeout t_s + t_b + 0.1 s, after the bounded
 deceleration finished.  STOP = Ctrl-C (decelerate, release).
 
@@ -1037,8 +1037,9 @@ def head_available() -> bool:
 def robot_problems(rig: Any, config: K1BridgeConfig) -> list[str]:
     """Auto-check 1 on the open connection (read-only): mode, fall state, a fresh joint
     state, arm and head joints inside their ranges."""
-    transport, now = rig.transport, rig.clock()
+    transport = rig.transport
     mode, fall, state = transport.latest_mode(), transport.latest_fall(), transport.latest_state()
+    now = rig.clock()  # after the readings: one stored while they are read is not from the future
     names = {value: name for name, value in ROBOT_MODES.items()}
     allowed = " or ".join(names.get(value, str(value)) for value in sorted(config.allowed_modes))
     found = []

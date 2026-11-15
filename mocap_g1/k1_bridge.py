@@ -600,7 +600,10 @@ class K1ArmBridge:
         state = self.transport.latest_state()
         if state is None:
             return None, math.inf
-        return state, now - state.receive_time_s
+        age = now - state.receive_time_s
+        if age < 0:  # arrived after ``now`` (a late tick): only ahead of the present is a clock fault
+            age = self.clock() - state.receive_time_s
+        return state, age
 
     def _robot_ready(self, now: float) -> str | None:
         """Why the mode or fall reading forbids motion now, or ``None``."""
