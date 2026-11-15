@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
-"""Click-through GUI for the Booster K1 hardware tests (the 13 steps of
-docs/k1-bringup-runbook.md).
+"""Click-through GUI for the Booster K1: the quick start (live arms after two automatic
+checks and the owner's Go) and, under "Advanced tests", the 13 steps of
+docs/k1-bringup-runbook.md.
 
     .venv/bin/python tools/control/k1_commission_gui.py
 
-It never moves the robot itself: each step runs the unchanged command-line tool
-(tools/control/k1_commission.py, tools/control/k1_arm_bridge.py for step 12 and
-tools/control/k1_live_bridge.py for step 13) in a child process through
+It never moves the robot itself: the quick start and step 13 run
+tools/control/k1_live_bridge.py, step 12 tools/control/k1_arm_bridge.py and the
+other steps tools/control/k1_commission.py, each in a child process through
 tools/control/k1_gui_child.py.  It shows the stage ladder of the open session's
-robot (mocap_g1/stage_gate.py) and locks a live stage the gate refuses.  The GUI turns the
+robot (mocap_g1/stage_gate.py); stage-gate problems are warnings on the Go
+screen.  The GUI turns the
 tool's questions into buttons, shows its output live, explains failures, and
 raises a red alarm when a release is not confirmed or a run ends abnormally.
 The real stop is always the Booster remote: LT+BACK (damping).
@@ -93,6 +95,15 @@ STEPS: list[tuple[str, str, str, str]] = [
      "drills, then Evaluate stage.", "The performer's arm motion"),
 ]
 TITLES = {key: title for key, title, _what, _moves in STEPS}
+TITLES["quick"] = "Quick start"
+QUICK_TEXT = ("Live arms in two clicks. Check: the tool probes the robot (read-only) and makes a "
+              "new session, then checks the robot (walking, not fallen, fresh joint state, joints "
+              "in range) and the suit stream (fresh, calibrated, tracking on, model, clock, the "
+              "performer's arms near the robot's). It shows a summary with any warnings; Go starts "
+              "the arms. Before Check: the live tool streams (--robot-stream), Calibrate and "
+              "Tracking on are done, the performer stands with arms down.")
+#: Steps whose confirm question is the owner's Go (the summary is its detail).
+GO_STEPS = ("quick", "live", "replay")
 
 ALARM_TEXT = ("STOP THE ROBOT WITH THE REMOTE NOW: LT+BACK (damping). Keep it on the hoist. "
               "Then read the log below and send the session folder to the developers.")
@@ -200,8 +211,8 @@ class StepRunner:
                                  str(event.get("detail", "")))
         elif kind == "session":
             self.session = Path(event["path"])
-        elif kind == "attempt":
-            self.attempt = event
+        elif kind == "attempt" and not (self.step == "quick" and event.get("step") == "probe"):
+            self.attempt = event  # the quick start's verdict is its live attempt, not the probe
         elif kind == "rpc":
             self.rpc.append(bool(event["enable"]))
         elif kind == "exit":
@@ -241,7 +252,7 @@ class StepRunner:
                 verdict = "INCOMPLETE"
         if verdict is None:
             if code == 0:
-                verdict = "PASS" if self.step in ("preflight", "replay", "live") else "DONE"
+                verdict = "PASS" if self.step in ("preflight", "replay", "live", "quick") else "DONE"
             elif code == 1:
                 verdict = "FAIL"
             elif code == 2:
@@ -327,7 +338,7 @@ def bounded(label: str, text: str, low: float, high: float) -> str:
 
 def live_command(session: Path, meta: dict[str, Any], *, stage: str, time_limit: str, port: str,
                  drill: str, operator: str = "", evaluate: bool = False,
-                 attested: str = "", record: Path | None = None) -> list[str]:
+                 attested: str = "", record: Path | None = None, head: bool = True) -> list[str]:
     """The k1_live_bridge.py arguments of step 13 (a run, or ``--evaluate``)."""
     if stage not in ("hoist", "standing"):
         raise ValueError("stage: choose hoist or standing")
@@ -344,11 +355,56 @@ def live_command(session: Path, meta: dict[str, Any], *, stage: str, time_limit:
         args += ["--drill", str(LIVE_DRILLS[drill])]
     if attested.strip():
         args += ["--attested-robot-id", attested.strip()]
-    if meta.get("transport") == "booster":
-        if record is None:
-            raise ValueError("no k1-acceptance.json in this session: run 11 · Record")
+    if not head:
+        args.append("--no-head")
+    if operator.strip():
+        args += ["--operator", operator.strip()]
+    if meta.get("transport") == "booster" and record is not None:  # optional: a warning if absent
         args += ["--acceptance-record", str(record)]
     return args
+
+
+def quick_command(*, transport: str, net: str, domain: str, model: str, stage: str,
+                  time_limit: str, port: str, support: str, strap_clear: bool, head: bool,
+                  record: str = "", operator: str = "", attested: str = "", firmware: str = "",
+                  root: Path | None = None) -> list[str]:
+    """The k1_live_bridge.py arguments of the quick start (from cold: no ``--session``)."""
+    if transport not in ("fake", "booster"):
+        raise ValueError("transport: choose fake or booster")
+    if stage not in ("hoist", "standing"):
+        raise ValueError("stage: choose hoist or standing")
+    if not support.strip() or "\n" in support:
+        raise ValueError("support: say how the robot is held")
+    args = ["--transport", transport, "--domain-id", bounded("DDS domain", domain, 0, 232),
+            "--root", str(root or ROOT), "--stage", stage,
+            "--time-limit", bounded("time limit", time_limit, 1, live.MAX_TIME_LIMIT_S),
+            "--port", bounded("port", port if port.strip().isdigit() else "x", 1024, 65535),
+            "--support", support.strip()]
+    for flag, value in (("--net", net_value(net)), ("--model", model.strip()),
+                        ("--acceptance-record", record.strip()), ("--operator", operator.strip()),
+                        ("--attested-robot-id", attested.strip()), ("--firmware", firmware.strip())):
+        if value:
+            args += [flag, value]
+    if record.strip() and not Path(record.strip()).is_file():
+        raise ValueError(f"acceptance record: {record.strip()} is not a file")
+    if stage == "hoist" and not strap_clear:
+        args.append("--strap-not-clear")
+    if not head:
+        args.append("--no-head")
+    return args
+
+
+def refusal_text(lines: list[str]) -> str:
+    """The tool's last ``REFUSED:``/``ERROR:`` line with its indented detail lines."""
+    for index in range(len(lines) - 1, -1, -1):
+        if lines[index].startswith(("REFUSED:", "ERROR:")):
+            found = [lines[index].split(":", 1)[1].strip()]
+            for line in lines[index + 1:]:
+                if not line.startswith("  "):
+                    break
+                found.append(line.strip())
+            return "\n".join(found)
+    return ""
 
 
 def sender_model(meta: dict[str, Any]) -> str | None:
@@ -664,17 +720,19 @@ def launch_block(key: str, state: dict[str, Any], *, read_guide: bool) -> str | 
             return "The mirror is already open."
     elif state.get("step") is not None:
         return "Another step is running."
-    if key not in ("preflight", "probe") and state.get("session") is None:
+    if key not in ("preflight", "probe", "quick") and state.get("session") is None:
         return "Needs a session: run 2 · Probe or open a session."
     if key == "probe" and state.get("mirror") is not None:
         return "Close the mirror before a new probe."
     if key == "replay" and not read_guide:
         return "Tick the box below the duration first."
+    if key == "quick" and state.get("mirror") is not None:
+        return "Close the mirror before a quick start (it makes a new session)."
     if key == "live":
         stage = state.get("live_stage", "hoist")
         reasons = (state.get("live_lock") or {}).get(stage) or []
         if reasons:
-            return f"Live arms {stage} is locked by the stage gate: {reasons[0]}"
+            return f"Live arms {stage} cannot start: {reasons[0]}"
     return None
 
 
@@ -715,7 +773,10 @@ def run_gui() -> int:  # pragma: no cover - exercised by hand and by the smoke t
         "kd": f"{SAFE['kd']:g}", "operator": "", "gains_attempt": "", "pkl": "",
         "duration": "10", "stage": "hoist", "answer": "", "live_stage": "hoist",
         "time_limit": f"{live.TIME_LIMIT_S:g}", "port": str(live.DEFAULT_PORT),
-        "drill": "Following"}.items()}
+        "drill": "Following", "support": live.SUPPORT_DEFAULT, "record": ""}.items()}
+    strap_clear = tk.BooleanVar(value=True)
+    head_follows = tk.BooleanVar(value=True)
+    has_head = live.head_available()
     read_guide = tk.BooleanVar(value=False)
     v["pkl"].trace_add("write", lambda *_: read_guide.set(False))  # a new file needs a new tick
     state["firewall"] = firewall_state()
@@ -771,15 +832,60 @@ def run_gui() -> int:  # pragma: no cover - exercised by hand and by the smoke t
     firewall_label.pack(side="left")
     firewall_button = ttk.Button(firewall_row, text="Allow the robot network in the firewall")
     firewall_button.pack(side="left", padx=8)
-    session_label = ttk.Label(bar, text="No session: run 1 · Preflight, then 2 · Probe.",
-                              font=big)
+    session_label = ttk.Label(bar, text="No session yet: Quick start makes one.", font=big)
     session_label.grid(row=5, column=0, columnspan=7, sticky="w", padx=4, pady=4)
     for name in ("mode", "transport", "net", "robot_ip"):
         v[name].trace_add("write", lambda *_: refresh())
 
-    # middle: steps, step panel
-    middle = ttk.Frame(root)
-    middle.pack(fill="both", expand=False, padx=8)
+    # the quick start (first screen) and the 13 steps under "Advanced tests"
+    tabs = ttk.Notebook(root)
+    tabs.pack(fill="x", padx=8)
+    quick = ttk.Frame(tabs)
+    tabs.add(quick, text="Quick start")
+    middle = ttk.Frame(tabs)
+    tabs.add(middle, text="Advanced tests (13 steps)")
+    ttk.Label(quick, text=QUICK_TEXT, wraplength=1300, justify="left").pack(anchor="w", padx=6,
+                                                                          pady=4)
+    qform = ttk.Frame(quick)
+    qform.pack(anchor="w", padx=6)
+    for column, (label, name, width, values) in enumerate((
+            ("Stage", "live_stage", 9, ("hoist", "standing")),
+            (f"Time limit (s, max {live.MAX_TIME_LIMIT_S:g})", "time_limit", 8, None),
+            ("Stream port", "port", 7, None), ("Support", "support", 24, None),
+            ("Your name (operator)", "operator", 18, None))):
+        ttk.Label(qform, text=label).grid(row=0, column=column, sticky="w", padx=4)
+        (ttk.Combobox(qform, textvariable=v[name], values=values, state="readonly", width=width)
+         if values else ttk.Entry(qform, textvariable=v[name], width=width)).grid(
+            row=1, column=column, sticky="w", padx=4)
+    qrecord = ttk.Frame(quick)
+    qrecord.pack(anchor="w", padx=6, pady=2)
+    ttk.Label(qrecord, text="Acceptance record (optional; without one: attempt 049's settings, "
+              "a warning)").pack(side="left")
+    ttk.Entry(qrecord, textvariable=v["record"], width=40).pack(side="left", padx=4)
+    record_button = ttk.Button(qrecord, text="Browse...", command=lambda: v["record"].set(
+        filedialog.askopenfilename(filetypes=[("Acceptance record", "*.json")],
+                                   initialdir=str(ROOT if ROOT.is_dir() else REPO_ROOT))
+        or v["record"].get()))
+    record_button.pack(side="left")
+    qticks = ttk.Frame(quick)
+    qticks.pack(anchor="w", padx=6, pady=2)
+    ttk.Checkbutton(qticks, variable=strap_clear, text="Strap clear of both arms (hoist; "
+                    "untick: shoulders stay within 0.6 rad of rest)").pack(side="left")
+    if has_head:  # without the head module --no-head does nothing: no tick box
+        ttk.Checkbutton(qticks, variable=head_follows, text="Head follows").pack(side="left",
+                                                                                 padx=16)
+    qbuttons = ttk.Frame(quick)
+    qbuttons.pack(anchor="w", padx=6, pady=6)
+    check_button = tk.Button(qbuttons, text="Check robot and stream", font=big, bg="#1f5fa8",
+                             fg="white", width=22)
+    check_button.pack(side="left")
+    quick_stop = tk.Button(qbuttons, text="STOP", font=big, bg="#b3261e", fg="white", width=10)
+    quick_stop.pack(side="left", padx=8)
+    quick_sender = ttk.Button(qbuttons, text="Start practice sender")
+    ttk.Label(qbuttons, text="STOP = Ctrl-C to the tool: it slows the arms, then releases "
+              "them.\nThe real stop is the remote: LT+BACK.", foreground="#b3261e").pack(side="left")
+    quick_result = tk.Label(quick, font=big, justify="left", wraplength=1300, anchor="w")
+    quick_result.pack(anchor="w", padx=6, pady=4)
     tree = ttk.Treeview(middle, columns=("evidence",), height=12, selectmode="browse")
     tree.heading("#0", text="Step")
     tree.heading("evidence", text="Evidence in this session")
@@ -964,7 +1070,7 @@ def run_gui() -> int:  # pragma: no cover - exercised by hand and by the smoke t
                 rows = {}
                 session_label.configure(text=str(exc))
         else:
-            session_label.configure(text="No session: run 1 · Preflight, then 2 · Probe.")
+            session_label.configure(text="No session yet: Quick start makes one.")
             rows = {}
         if state["preflight"]:
             rows["preflight"] = ("info", f"last run: {state['preflight']}")
@@ -997,6 +1103,14 @@ def run_gui() -> int:  # pragma: no cover - exercised by hand and by the smoke t
         else:
             firewall_button.pack(side="left", padx=8)
         stop_button.configure(state="normal" if state["step"] is not None else "disabled")
+        quick_stop.configure(state="normal" if state["step"] is not None else "disabled")
+        check_button.configure(state="disabled" if can_run("quick") else "normal",
+                               text="Re-check" if state.get("quick_run") else
+                               "Check robot and stream")
+        if v["transport"].get() == "booster":
+            quick_sender.pack_forget()
+        else:
+            quick_sender.pack(side="left", padx=8, before=quick_stop)
         if state["mirror"] is not None:
             mirror_stop.pack(side="left", padx=8)
         else:
@@ -1005,10 +1119,11 @@ def run_gui() -> int:  # pragma: no cover - exercised by hand and by the smoke t
         run_button.configure(state="disabled" if why else "normal")
         why_label.configure(text=why or "")
         sender = state["sender"]
+        sending = "Stop practice sender" if sender is not None and sender.running \
+            else "Start practice sender"
+        quick_sender.configure(text=sending)
         if "sender" in live_widgets:
-            live_widgets["sender"].configure(
-                text="Stop practice sender" if sender is not None and sender.running
-                else "Start practice sender")
+            live_widgets["sender"].configure(text=sending)
         if "evaluate" in live_widgets:
             live_widgets["evaluate"].configure(state="disabled" if why else "normal")
 
@@ -1028,10 +1143,8 @@ def run_gui() -> int:  # pragma: no cover - exercised by hand and by the smoke t
                 state["ladder"] = [("acceptance", "Ledger", "invalid", str(exc))]
             if meta.get("transport") == "booster":
                 record = acceptance_record(session)
-                state["live_lock"] = {
-                    stage: live.lock_reasons(session, stage, record) if record is not None
-                    else ["no k1-acceptance.json in this session: run 11 · Record"]
-                    for stage in ("hoist", "standing")}
+                state["live_lock"] = {stage: live.lock_reasons(session, stage, record)
+                                      for stage in ("hoist", "standing")}
         show_lock()
         fill_ladder()
 
@@ -1045,8 +1158,9 @@ def run_gui() -> int:  # pragma: no cover - exercised by hand and by the smoke t
                             "ledger and unlock nothing.", foreground=colours["info"])
             return
         reasons = state["live_lock"].get(stage) or []
-        label.configure(text=(f"{stage}: allowed by the stage gate." if not reasons else
-                              f"{stage} is LOCKED by the stage gate:\n  " + "\n  ".join(reasons[:4])
+        label.configure(text=(f"{stage}: can start; stage-gate problems show as warnings before "
+                              "Go." if not reasons else
+                              f"{stage} cannot start:\n  " + "\n  ".join(reasons[:4])
                               + (f"\n  ... and {len(reasons) - 4} more" if len(reasons) > 4 else "")),
                         foreground=colours["valid" if not reasons else "bad"])
 
@@ -1178,7 +1292,7 @@ def run_gui() -> int:  # pragma: no cover - exercised by hand and by the smoke t
                       wraplength=520).pack(anchor="w", pady=4)
 
     def live_options() -> None:
-        entry("Stage (standing needs the gate)", "live_stage", values=["hoist", "standing"])
+        entry("Stage", "live_stage", values=["hoist", "standing"])
         lock = ttk.Label(options, wraplength=520, justify="left")
         lock.pack(anchor="w", pady=2)
         live_widgets["lock"] = lock
@@ -1208,7 +1322,7 @@ def run_gui() -> int:  # pragma: no cover - exercised by hand and by the smoke t
         ttk.Button(row, text="Stage ladder", command=show_ladder).pack(side="left", padx=8)
         show_lock()
 
-    def toggle_sender() -> None:
+    def toggle_sender(quick_start: bool = False) -> None:
         sender = state["sender"]
         if sender is not None and sender.running:
             write("=== Practice sender: stopping (the stream ends).", "gui")
@@ -1216,23 +1330,25 @@ def run_gui() -> int:  # pragma: no cover - exercised by hand and by the smoke t
             state["sender"] = None
             refresh()
             return
-        if transport_now() == "booster" or state["session"] is None:
+        if (v["transport"].get() if quick_start else transport_now()) == "booster" or (
+                not quick_start and state["session"] is None):
             return
         try:
             port = int(bounded("port", v["port"].get(), 1024, 65535))
         except ValueError as exc:
             result_label.configure(text=f"Cannot start the sender: {exc}", fg=colours["bad"])
             return
-        sender = PracticeSender(port, state["session"] / "gui-logs" /
-                                f"{dt.datetime.now():%Y%m%d-%H%M%S}-sender.log",
-                                sender_model(state["meta"]))
+        # the quick start's new session uses the model field; step 13 the open session's model
+        model = (v["model"].get().strip() or None) if quick_start else sender_model(state["meta"])
+        sender = PracticeSender(port, (state["session"] or ROOT) / "gui-logs" /
+                                f"{dt.datetime.now():%Y%m%d-%H%M%S}-sender.log", model)
         try:
             sender.start()
         except OSError as exc:
             result_label.configure(text=f"Cannot start the sender: {exc}", fg=colours["bad"])
             return
         state["sender"] = sender
-        if state["step"] is not None and state["step"].step == "live":
+        if state["step"] is not None and state["step"].step in ("live", "quick"):
             state["step"].companions.append(sender)
         write(f"=== Practice sender: streaming to 127.0.0.1:{port} (log {sender.log_path})", "gui")
         refresh()
@@ -1248,6 +1364,15 @@ def run_gui() -> int:  # pragma: no cover - exercised by hand and by the smoke t
 
     def command(key: str, evaluate: bool = False) -> tuple[str, list[str]]:
         session, meta = state["session"], state["meta"]
+        if key == "quick":
+            return "live", quick_command(
+                transport=v["transport"].get(), net=v["net"].get(), domain=v["domain"].get(),
+                model=v["model"].get(), stage=v["live_stage"].get(),
+                time_limit=v["time_limit"].get(), port=v["port"].get(),
+                support=v["support"].get(), strap_clear=strap_clear.get(),
+                head=head_follows.get() or not has_head, record=v["record"].get(),
+                operator=v["operator"].get(), attested=v["attested"].get(),
+                firmware=v["firmware"].get())
         model = ["--model", v["model"].get()] if v["model"].get().strip() else []
         attested = (["--attested-robot-id", v["attested"].get().strip()]
                     if v["attested"].get().strip() else [])
@@ -1311,51 +1436,71 @@ def run_gui() -> int:  # pragma: no cover - exercised by hand and by the smoke t
             return "replay", args
         if key == "live":
             record = acceptance_record(session) if meta["transport"] == "booster" else None
-            if record is not None and evidence(session, v["mode"].get())["record"][0] == "bad":
-                raise ValueError("the acceptance record is stale: run 11 · Record again")
             return "live", live_command(
                 session, meta, stage=v["live_stage"].get(), time_limit=v["time_limit"].get(),
                 port=v["port"].get(), drill=v["drill"].get(), operator=v["operator"].get(),
-                evaluate=evaluate, attested=v["attested"].get(), record=record)
+                evaluate=evaluate, attested=v["attested"].get(), record=record,
+                head=head_follows.get() or not has_head)
         raise ValueError(f"unknown step {key}")
 
-    def launch(evaluate: bool = False) -> None:
-        key = state["selected"]
+    def launch(evaluate: bool = False, key: str | None = None) -> None:
+        key = key or state["selected"]
+        shown = quick_result if key == "quick" else result_label
         why = can_run(key)
         if why:
-            result_label.configure(text=why, fg=colours["bad"])
+            shown.configure(text=why, fg=colours["bad"])
             return
         try:
             tool, args = command(key, evaluate)
         except ValueError as exc:
-            result_label.configure(text=f"Cannot start: {exc}", fg=colours["bad"])
+            shown.configure(text=f"Cannot start: {exc}", fg=colours["bad"])
             return
         logs_dir = (state["session"] or ROOT) / "gui-logs"
         runner = StepRunner(tool, args, logs_dir / f"{dt.datetime.now():%Y%m%d-%H%M%S}-{key}.log",
                             step=key)
-        runner.session = state["session"] if key != "probe" else None
+        runner.session = state["session"] if key not in ("probe", "quick") else None
         write(f"=== {TITLES[key]}: {' '.join(args)}", "gui")
         try:
             runner.start()
         except OSError as exc:
-            result_label.configure(text=f"Cannot start: {exc}", fg=colours["bad"])
+            shown.configure(text=f"Cannot start: {exc}", fg=colours["bad"])
             return
         state["mirror" if key == "mirror" else "step"] = runner
-        if key == "live" and state["sender"] is not None:
+        if key in ("live", "quick") and state["sender"] is not None:
             runner.companions.append(state["sender"])  # stopped with the step
         if key != "mirror":
             show_live(None)
-        result_label.configure(text=f"{TITLES[key]}: running...", fg=colours["info"])
+        shown.configure(text=("Checking the robot and the stream (read-only)..." if key == "quick"
+                              else f"{TITLES[key]}: running..."), fg=colours["info"])
         hint_label.pack_forget()
         refresh()
 
     run_button.configure(command=lambda: launch())
+    check_button.configure(command=lambda: launch(key="quick"))
+    quick_sender.configure(command=lambda: toggle_sender(quick_start=True))
     def request_stop() -> None:
         if state["step"] is not None:
             write("=== Stop requested (Ctrl-C): the tool stops and releases the arms.", "gui")
             state["step"].stop()
 
     stop_button.configure(command=request_stop)
+    quick_stop.configure(command=request_stop)
+
+    def clear_go(*_args: Any) -> None:
+        """The Go belongs to the settings on the screen: a change cancels the open Go."""
+        runner = state["step"]
+        prompt = runner.prompt if runner is not None and runner.step == "quick" else None
+        if prompt is not None and not prompt.answered and runner.answer(prompt.id, "no"):
+            write("=== A setting changed: the Go is cleared. Press Re-check.", "gui")
+            quick_result.configure(text="A setting changed: the Go is cleared. Press Re-check.",
+                                   fg=colours["bad"])
+            show_prompt(runner)
+
+    for name in ("live_stage", "time_limit", "port", "support", "record", "operator", "transport",
+                 "net", "domain", "model", "attested", "firmware"):
+        v[name].trace_add("write", clear_go)
+    for flag in (strap_clear, head_follows):
+        flag.trace_add("write", clear_go)
     mirror_stop.configure(command=lambda: state["mirror"] and state["mirror"].stop())
 
     def show_prompt(runner: StepRunner) -> None:
@@ -1368,12 +1513,15 @@ def run_gui() -> int:  # pragma: no cover - exercised by hand and by the smoke t
             prompt_frame.pack_forget()
             return
         prompt_frame.pack(fill="x", padx=8, pady=4, before=logs)
+        go = prompt.kind == "confirm" and runner.step in GO_STEPS
         prompt_text.configure(text=(
+            "Read the summary above. Go starts the robot; a changed setting clears the Go. "
+            "(In this window, Ctrl-C is the red STOP button.)" if go else
             "Read the plan and the checklist above. Is all of it true? "
             "(In this window, Ctrl-C is the red STOP button.)" if prompt.kind == "confirm"
             else prompt.text))
         if prompt.detail:
-            prompt_detail.configure(state="normal")
+            prompt_detail.configure(state="normal", height=min(20, prompt.detail.count("\n") + 2))
             prompt_detail.delete("1.0", "end")
             prompt_detail.insert("1.0", prompt.detail)
             prompt_detail.configure(state="disabled")
@@ -1390,8 +1538,9 @@ def run_gui() -> int:  # pragma: no cover - exercised by hand and by the smoke t
                 write("=== That answer was not sent: the question is no longer open.", "gui")
 
         if prompt.kind == "confirm":
-            tk.Button(prompt_buttons, text="All of the above is true: start", font=big,
-                      bg="#1e7b34", fg="white", command=lambda: send("yes")).pack(side="left")
+            tk.Button(prompt_buttons, text="Go" if go else "All of the above is true: start",
+                      font=big, bg="#1e7b34", fg="white", width=10 if go else 0,
+                      command=lambda: send("yes")).pack(side="left")
             tk.Button(prompt_buttons, text="Cancel", font=big,
                       command=lambda: send("no")).pack(side="left", padx=8)
         elif prompt.kind == "yesno":
@@ -1422,11 +1571,24 @@ def run_gui() -> int:  # pragma: no cover - exercised by hand and by the smoke t
         elif key == "probe":
             write("=== Probe failed: no session was created; the open session is unchanged.",
                   "fail")
+        if key == "quick":
+            if runner.session is not None:
+                target = runner.session / "gui-logs"
+                target.mkdir(exist_ok=True)
+                shutil.copy2(runner.log_path, target / runner.log_path.name)
+                set_session(runner.session)
+            state["quick_run"] = f"{outcome.verdict} {dt.datetime.now():%H:%M}"
+            why = refusal_text(runner.lines)
+            quick_result.configure(
+                text=(f"Quick start: {outcome.verdict}" + (f": {why}" if why else "")
+                      + ("\nFix what is named above, then press Re-check."
+                         if outcome.verdict == "REFUSED" else "")),
+                fg=colours["valid"] if outcome.verdict in ("PASS", "DONE") else colours["bad"])
         if key == "preflight":
             state["preflight"] = f"{outcome.verdict} {dt.datetime.now():%H:%M}"
         if key == "replay":
             state["replay"] = f"{outcome.verdict} {dt.datetime.now():%H:%M}"
-        if key == "live":
+        if key in ("live", "quick"):
             state["live_run"] = f"{outcome.verdict} {dt.datetime.now():%H:%M}"
         if state["sender"] is not None and not state["sender"].running:
             state["sender"] = None
@@ -1512,6 +1674,7 @@ def run_gui() -> int:  # pragma: no cover - exercised by hand and by the smoke t
     root.protocol("WM_DELETE_WINDOW", on_close)
     tree.selection_set("preflight")
     select()
+    tabs.select(quick)
     root.after(100, tick)
     root.mainloop()
     return 0

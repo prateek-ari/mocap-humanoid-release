@@ -133,7 +133,7 @@ def install_hooks(tool_name: str, argv: list[str]) -> None:
 
         k1_live_bridge.STATUS = lambda fields: emit("live", **fields)
 
-    if tool_name in ("commission", "live"):  # the live bridge asks through k1_commission
+    if tool_name in ("commission", "live", "replay"):  # the bridges ask through k1_commission
         from tools.control import k1_commission as tool
 
         def ask(question: str) -> str:

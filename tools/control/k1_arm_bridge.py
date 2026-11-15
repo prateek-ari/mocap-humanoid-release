@@ -10,13 +10,15 @@ command back as its measured arm position, in walking mode and not fallen.
 ``--transport booster --probe`` connects to a real K1 read-only: it never
 publishes and never takes over the arms, and reports what the acceptance
 record needs (state rate, robot mode, fall messages, robot info, bindings).
-``--transport booster`` replays on a real K1 as a gated stage:
+``--transport booster`` replays on a real K1 as a stage:
 ``--session`` (the commissioning session) and ``--stage hoist|standing`` are
-required, the stage gate (mocap_g1/stage_gate.py) must allow ``replay@<stage>``
-for this robot and these settings, and the session's acceptance record must be
-the one registered in the stage ledger.  Each run writes an attempt into the
-session; a PASS (full duration of at least REPLAY_PASS_MIN_S, no fault, release
-confirmed, tracking p95 below 0.15 rad) is written to the ledger, and an
+required.  The stage gate (mocap_g1/stage_gate.py) problems for ``replay@<stage>``
+and a missing or unregistered acceptance record are warnings (quick start): the
+tool shows them and starts only on the owner's Go (``--go``, else one question).
+Without a record it uses attempt 049's settings (kp 40, kd 2, 2 rad/s, 8 rad/s^2);
+a record that is given must be valid.  Each run writes an attempt into the session; a PASS (full duration of at
+least REPLAY_PASS_MIN_S, no fault, release confirmed, tracking p95 below 0.15 rad)
+is written to the ledger when the run started without warnings, and an
 unconfirmed release or a fall revokes the stage the replay ran under.  With
 ``--transport fake --session`` the same happens in the PRACTICE ledger only.
 
@@ -24,7 +26,7 @@ unconfirmed release or a fall revokes the stage the replay ran under.  With
     python3 tools/control/k1_arm_bridge.py --transport booster --probe --net 192.168.10.10
     python3 tools/control/k1_arm_bridge.py k1.pkl --transport booster --net 192.168.10.10 \\
         --session k1-commissioning/<session> --stage hoist \\
-        --yes-i-have-read-the-unverified-section
+        --yes-i-have-read-the-unverified-section --go
 
 Exit status: 0 when the replay ended with the arms released, 1 when it ended on
 a fault (arms released) or could not confirm the release, 2 for invalid input or
@@ -36,7 +38,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import json
 import math
 from pathlib import Path
@@ -86,6 +88,9 @@ from tools.control.g1_arm_bridge import (  # noqa: E402
 )
 
 ROBOT = LIVE_ROBOTS["booster_k1"]
+#: Without an acceptance record on the real robot: the settings of attempt 049 (2 min of live
+#: arms on the real K1, 2026-11-15), as the live bridge's quick start.
+NO_RECORD = {"kp": 40.0, "kd": 2.0, "speed_max_rad_s": 2.0, "accel_max_rad_s2": 8.0}
 REPLAY_PASS_MIN_S = 10.0
 REPLAY_P95_LIMIT_RAD = 0.15
 #: Faults that revoke the stage a replay ran under; others are a FAIL only.
@@ -239,6 +244,8 @@ def build_parser() -> argparse.ArgumentParser:
                         help="the robot serial number, when GetRobotInfo cannot report it")
     parser.add_argument("--yes-i-have-read-the-unverified-section", action="store_true",
                         help="required with --transport booster")
+    parser.add_argument("--go", action="store_true",
+                        help="booster: the owner's Go after the summary (else one question)")
     parser.add_argument("--net", dest="network_interface", default="",
                         help="booster: this PC's interface or IP on the robot network")
     parser.add_argument("--domain-id", type=int, default=0)
@@ -273,6 +280,8 @@ class ReplayStage:
     settings: dict[str, Any]
     operator: str
     attempt: Any = None
+    #: Stage-gate and record problems shown before Go; a run with any writes no PASS.
+    warnings: list[str] = field(default_factory=list)
 
 
 def stop_settings(config: K1BridgeConfig, limits: Mapping[str, Any]) -> dict[str, Any]:
@@ -297,8 +306,8 @@ def replay_settings(config: K1BridgeConfig, rate_hz: float, model_sha256: str | 
 def open_stage(args: argparse.Namespace, *, real: bool, record: AcceptanceRecord | None,
                config: K1BridgeConfig, model_path: Path | None,
                limits: Mapping[str, Any]) -> ReplayStage | None:
-    """The gated stage of this run (``None``: a plain fake replay); raises
-    :class:`K1BridgeError` when the gate refuses it."""
+    """The stage of this run (``None``: a plain fake replay); gate and record problems are its
+    ``warnings``; raises :class:`K1BridgeError` for what still refuses."""
     if args.session is None:
         if real:
             raise K1BridgeError("--transport booster requires --session (the commissioning "
@@ -320,27 +329,55 @@ def open_stage(args: argparse.Namespace, *, real: bool, record: AcceptanceRecord
                     "sdk_binding_version": str(meta.get("sdk_binding_version"))}
         return ReplayStage(stage, session, Ledger(commissioning_root(), "PRACTICE", practice=True),
                            identity, settings, args.operator or "practice")
-    assert record is not None
     if meta.get("transport") != "booster" or meta.get("practice") is not False:
         raise K1BridgeError("a practice session cannot run a real replay")
-    serial = str(record.data["robot_identity"]["serial_number"])
+    serial = str(record.data["robot_identity"]["serial_number"]) if record else str(meta.get("serial"))
     if meta.get("serial") != serial:
         raise K1BridgeError(f"the acceptance record's robot {serial} is not the session's "
                             f"{meta.get('serial')}")
-    identity = {"serial": serial, "firmware": str(record.data["firmware"]),
+    identity = {"serial": serial,
+                "firmware": str(record.data["firmware"] if record else meta.get("firmware")),
                 "sdk_binding_version": binding_version() or ""}
     ledger = Ledger(commissioning_root(), serial, practice=False)
-    problems = require(stage, ledger=ledger, identity=identity, settings=settings)
-    if problems:
-        raise K1BridgeError(f"the stage gate refuses {STAGES[stage].title}:\n  "
-                            + "\n  ".join(problems))
-    acceptance = ledger.latest("acceptance") or {}
-    registered = (acceptance.get("evidence") or {}).get("acceptance-record") or {}
-    if registered.get("sha256") != sha256_file(args.acceptance_record):
-        raise K1BridgeError("the acceptance record is not the one registered in the stage "
-                            "ledger: run 11 · Record again")
+    warnings = [f"stage gate {STAGES[stage].title}: {problem}"
+                for problem in require(stage, ledger=ledger, identity=identity, settings=settings)]
+    if record is None:
+        warnings.append("no acceptance record: attempt 049's settings unless given "
+                        "(kp 40, kd 2, 2 rad/s, 8 rad/s^2)")
+    else:
+        acceptance = ledger.latest("acceptance") or {}
+        registered = (acceptance.get("evidence") or {}).get("acceptance-record") or {}
+        if registered.get("sha256") != sha256_file(args.acceptance_record):
+            warnings.append("the acceptance record is not the one registered in the stage ledger")
     return ReplayStage(stage, session, ledger, identity, settings,
-                       args.operator or str(record.data["operator"]))
+                       args.operator or (str(record.data["operator"]) if record else "operator"),
+                       warnings=warnings)
+
+
+def owner_go(args: argparse.Namespace, stage: ReplayStage, config: K1BridgeConfig, *,
+             duration: float) -> dict[str, Any]:
+    """The summary with its warnings, then the owner's Go (``--go`` or one question)."""
+    from tools.control import k1_commission as commission
+
+    lines = [f"REAL ROBOT {stage.identity['serial']}, firmware {stage.identity['firmware']}: "
+             f"{STAGES[stage.stage].title}, {args.input.name}, {duration:g} s",
+             f"Settings: kp {config.kp:g}, kd {config.kd:g}, speed cap {config.speed_max_rad_s:g} "
+             f"rad/s, acceleration cap {config.accel_max_rad_s2:g} rad/s^2, {args.rate:g} Hz",
+             "STOP: Ctrl-C (or the window's STOP). The real stop is the remote: LT+BACK."]
+    lines += (["Warnings:"] + [f"  - {text}" for text in stage.warnings] if stage.warnings
+              else ["Warnings: none"])
+    summary = "\n".join(lines)
+    text = "REPLAY SUMMARY\n" + summary
+    if args.go:
+        print(text, flush=True)
+        via = "--go"
+    elif commission.confirm(text + "\nGo starts the replay now."):
+        via = "question"
+    else:
+        raise K1BridgeError("not confirmed")
+    return {"operator": stage.operator, "time": commission.now_iso(), "via": via,
+            "warnings": list(stage.warnings), "session": str(stage.session.path),
+            "settings": dict(stage.settings), "summary": summary}
 
 
 def finish_stage(stage: ReplayStage, bridge: K1ArmBridge, *, completed: bool, played_s: float,
@@ -368,7 +405,9 @@ def finish_stage(stage: ReplayStage, bridge: K1ArmBridge, *, completed: bool, pl
     revoke = bridge.state == "release_unconfirmed" or str(fault or "").startswith(REVOKING_FAULTS)
     gate = STAGES[stage.stage].gate[0]
     try:
-        if verdict == "PASS":
+        if verdict == "PASS" and stage.warnings:
+            print("Ledger: no PASS written (the run started with warnings)")
+        elif verdict == "PASS":
             stage.ledger.record_pass(stage.stage, identity=stage.identity, settings=stage.settings,
                                      evidence=evidence, operator=stage.operator,
                                      extra={"session": str(stage.session.path),
@@ -412,14 +451,18 @@ def main(argv: list[str] | None = None) -> int:
     record = None
     try:
         if real:
-            if args.acceptance_record is None and args.session is not None:
+            if args.acceptance_record is None and args.session is not None \
+                    and (args.session / "k1-acceptance.json").is_file():
                 args.acceptance_record = args.session / "k1-acceptance.json"
-            if args.acceptance_record is None:
+            if args.acceptance_record is None and args.session is None:
                 raise K1BridgeError("--transport booster requires --session and --stage")
-            record = AcceptanceRecord.load(args.acceptance_record)
+            if args.acceptance_record is not None:  # a record that is given must be valid
+                record = AcceptanceRecord.load(args.acceptance_record)
         approved = record.data.get("approved") if record is not None else None
         approved = approved if isinstance(approved, dict) else {}
         defaults = K1BridgeConfig()
+        if real and record is None:
+            defaults = K1BridgeConfig(**NO_RECORD)
 
         def setting(given: float | None, key: str, default: float) -> Any:
             return given if given is not None else approved.get(key, default)
@@ -443,6 +486,10 @@ def main(argv: list[str] | None = None) -> int:
         limits = robot_envelope_limits(ROBOT)
         stage = open_stage(args, real=real, record=record, config=config, model_path=model_path,
                            limits=limits)
+        if real:
+            assert stage is not None
+            go = owner_go(args, stage, config, duration=(len(dof) - 1) / fps
+                          if args.duration is None else min(args.duration, (len(dof) - 1) / fps))
     except (K1BridgeError, ValueError, OSError, pickle.UnpicklingError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
@@ -485,6 +532,8 @@ def main(argv: list[str] | None = None) -> int:
     jsonl = args.jsonl
     if stage is not None:
         stage.attempt = stage.session.start(stage.stage, stage.settings, {})
+        if real:
+            stage.attempt.data["owner_go"] = go
         jsonl = jsonl or stage.attempt.path.with_suffix(".jsonl")
     handle = jsonl.open("w", encoding="utf-8") if jsonl else None
     reasons: dict[str, int] = {}
@@ -504,14 +553,21 @@ def main(argv: list[str] | None = None) -> int:
     try:
         with sigint_gate() as gate:  # Ctrl-C waits for the takeover call, then stops cleanly
             try:
-                if record is not None:
+                if real:
+                    assert stage is not None
+                    meta = stage.session.meta
+                    expected = record or AcceptanceRecord({
+                        "robot_identity": {"serial_number": meta.get("serial")},
+                        "firmware": meta.get("firmware"),
+                        "identity_source": meta.get("identity_source")})
                     try:
                         info = transport.robot_info()
                     except LocoError:
                         info = None
-                    mismatched = record.identity_mismatches(info, args.attested_robot_id)
+                    mismatched = expected.identity_mismatches(info, args.attested_robot_id)
                     if mismatched:
-                        raise K1BridgeError("acceptance record does not match this robot:\n  "
+                        raise K1BridgeError(("acceptance record" if record else "the session")
+                                            + " does not match this robot:\n  "
                                             + "\n  ".join(mismatched))
                     wait_for_readings(transport, READINGS_TIMEOUT_S)
                 hold = bridge.takeover().arm_positions()

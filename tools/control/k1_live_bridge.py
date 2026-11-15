@@ -4,9 +4,14 @@
     live_g1_sim.py --robot booster_k1 --robot-stream udp://127.0.0.1:47011
         ──UDP──▶ this bridge ──▶ K1ArmBridge + envelope ──▶ rt/joint_ctrl
 
-Every run belongs to a commissioning session (``k1_commission.py probe``); the
-session decides the transport (fake = practice robot, booster = the real K1).
+Quick start (one command from cold): the probe makes a new session (fake = practice robot,
+booster = the real K1), auto-check 1 (robot: serial, firmware, walking mode, not fallen, fresh
+joint state, joints in range), auto-check 2 (stream: fresh, calibrated, tracking on, model,
+clock, arms within the takeover gap), a summary, then Go: ``--go`` on the command line, else
+one question here.  Stage-gate problems and a missing acceptance record are warnings in the
+summary; without a record the run uses attempt 049's settings (kp 40, kd 2, 2 rad/s, 8 rad/s^2).
 
+    python3 tools/control/k1_live_bridge.py --transport booster --net 192.168.10.10 --go
     python3 tools/control/k1_live_bridge.py --session DIR --stage hoist
     python3 tools/control/k1_live_bridge.py --session DIR --stage hoist --drill stream-loss
     python3 tools/control/k1_live_bridge.py --session DIR --stage hoist --drill stop
@@ -25,20 +30,20 @@ deceleration finished.  STOP = Ctrl-C (decelerate, release).
 ledger entry.  On the real robot the stage gate must allow the stage first.
 
 Exit status: 0 PASS (or a confirmed release after STOP), 1 FAIL or an
-unconfirmed release, 2 refused.
+unconfirmed release, 2 refused (a failed auto-check, or no Go).
 """
 
 from __future__ import annotations
 
 import argparse
 from collections import deque
+import getpass
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 import json
 import math
 from pathlib import Path
 import socket
-import statistics
 import sys
 import threading
 from types import SimpleNamespace
@@ -53,6 +58,9 @@ sys.path.insert(0, str(REPO_ROOT))
 from mocap_g1.arm_bridge import ArmBridgeError  # noqa: E402
 from mocap_g1.io_utils import sha256_file  # noqa: E402
 from mocap_g1.k1_bridge import (  # noqa: E402
+    FALL_READY,
+    RANGE_TOLERANCE_RAD,
+    ROBOT_MODES,
     AcceptanceRecord,
     K1ArmBridge,
     K1BridgeConfig,
@@ -66,12 +74,19 @@ from mocap_g1.k1_live_packet import (  # noqa: E402
     joint_order_hash,
     model_hash_prefix,
 )
-from mocap_g1.live_robots import K1_UPPER_BODY_JOINTS as ARMS  # noqa: E402
+from mocap_g1.live_robots import K1_JOINTS, K1_UPPER_BODY_JOINTS as ARMS, robot_joint_ranges  # noqa: E402
 from mocap_g1.safety import ArmSafetyEnvelope, SafetyConfig  # noqa: E402
 from mocap_g1.schema import JointLimit  # noqa: E402
+from mocap_g1.time_namespace import time_namespace_problem  # noqa: E402
 from tools.control import k1_commission as commission  # noqa: E402
 from tools.control.g1_arm_bridge import iter_dds_replay_ticks, sigint_gate  # noqa: E402
-from tools.control.k1_arm_bridge import MANUAL_STOP, READINGS_TIMEOUT_S, contact_check, wait_for_readings  # noqa: E402
+from tools.control.k1_arm_bridge import (  # noqa: E402
+    MANUAL_STOP,
+    NO_RECORD,
+    READINGS_TIMEOUT_S,
+    contact_check,
+    wait_for_readings,
+)
 
 LIMITS = commission.LIMITS
 CONTROL_DT = 0.02  # 50 Hz, the tested rate (100 Hz only after S2)
@@ -81,8 +96,8 @@ DEFAULT_PORT = 47011
 STALE_S = 0.10               # t_s: hold when the newest fresh suit frame is older
 STALL_S = 0.10               # tick_stall_timeout_s: 5 ticks at 50 Hz
 MAX_STOP_BOUND_S = 1.5       # refuse settings whose hard timeout exceeds this
-CLOCK_PACKETS = 5
-CLOCK_TOLERANCE_S = 0.020
+#: A sender time this far ahead of this PC's clock proves a clock mismatch (stream clock rule 3).
+AHEAD_S = 0.002
 RANGE_SLACK_RAD = 0.05       # further outside the K1 range: dropped; inside it: clamped
 DROP_FAULT_PER_S = 20
 FROZEN_PACKETS = 3
@@ -102,6 +117,11 @@ GATE_WAIT_S = 60.0
 HOIST_SHOULDER_RAD = 0.6
 SHOULDERS = tuple(name for name in ARMS if "Shoulder" in name)
 TIME_LIMIT_S, MAX_TIME_LIMIT_S = 120.0, 600.0
+# Quick start
+QUICK_PROBE_S = 5.0          # auto-check 1's read-only probe on the real robot
+STREAM_CHECK_S = 10.0        # auto-check 2 waits this long for the stream conditions
+SUPPORT_DEFAULT = "held by a person"
+HEAD_JOINTS = tuple(name for name in K1_JOINTS if "Head" in name)
 # Stage PASS and requalification
 PASS_FOLLOW_S, REQUALIFY_FOLLOW_S = 600.0, 120.0
 PASS_CYCLES = 5
@@ -169,12 +189,16 @@ class StreamView:
     """What the control loop reads from the receiver each tick."""
 
     packet: LivePacket | None
-    #: Suit receive time of the newest packet that still counts as fresh (counter advancing).
+    #: When the stream was last fresh, on this PC's clock (the same clock as the sender's,
+    #: rule 1): the older of the suit receive time of the newest fresh packet (counter
+    #: advancing, sender time) and this PC's receive time of the last counter advance (rule 4).
     fresh_time: float | None
-    #: Latched ``new_session`` / ``new_epoch`` once the run locked the stream.
+    #: Latched ``new_session`` / ``new_epoch`` once the run locked the stream; ``clock_mismatch``
+    #: (rule 3) at any time.
     event: str | None
     drops_last_s: int
-    clock_offset_s: float | None
+    #: Why the stream's clock cannot be this PC's (rule 3), or ``None``.
+    clock_error: str | None = None
 
 
 def stream_limits(model: Path | None) -> dict[str, Any]:
@@ -213,7 +237,8 @@ class StreamReceiver:
         self._locked: tuple[int, int] | None = None  # (session id, epoch) adopted at takeover
         self._event: str | None = None
         self._drop_times: deque[float] = deque()
-        self._offsets: list[float] = []
+        self._advanced_at: float | None = None  # this PC's time of the last counter advance
+        self._clock_error: str | None = None
         self.received = 0
         self.accepted = 0
         self.drops: dict[str, int] = {}
@@ -242,7 +267,6 @@ class StreamReceiver:
             last = self._packet
             if last is not None and packet.session_id != last.session_id:
                 last = None  # before takeover a restarted sender simply starts over
-                self._offsets.clear()
             if last is not None and packet.sequence <= last.sequence:
                 return self._drop("sequence", now)
             if last is not None and packet.generation < last.generation:
@@ -251,10 +275,18 @@ class StreamReceiver:
                 limit = self.limits[name]
                 if not limit.lower - RANGE_SLACK_RAD <= value <= limit.upper + RANGE_SLACK_RAD:
                     return self._drop("range", now)
-            if len(self._offsets) < CLOCK_PACKETS:
-                self._offsets.append(now - packet.sender_monotonic_s)
+            ahead = max(packet.sender_monotonic_s, packet.suit_receive_s) - now
+            if ahead > AHEAD_S:  # rule 3: one clock cannot stamp a time not yet reached
+                self._clock_error = self._clock_error or (
+                    f"the stream's clock is {ahead * 1e3:.1f} ms ahead of this PC's: run the "
+                    "live tool on this PC, on the host's clock (Docker with --network host, "
+                    "no time namespace)")
+                self._event = self._event or "clock_mismatch"
+                return "clock_ahead"
             self._repeats = self._repeats + 1 if (
                 last is not None and packet.sample_counter == last.sample_counter) else 0
+            if self._repeats == 0:
+                self._advanced_at = now
             self._packet = packet
             self.accepted += 1
             if self._repeats < FROZEN_PACKETS:
@@ -272,10 +304,10 @@ class StreamReceiver:
         with self._lock:
             while self._drop_times and self._drop_times[0] <= now - 1.0:
                 self._drop_times.popleft()
-            offset = (statistics.median(self._offsets)
-                      if len(self._offsets) >= CLOCK_PACKETS else None)
-            return StreamView(self._packet, self._fresh_time, self._event, len(self._drop_times),
-                              offset)
+            fresh = (None if self._fresh_time is None or self._advanced_at is None
+                     else min(self._fresh_time, self._advanced_at))
+            return StreamView(self._packet, fresh, self._event, len(self._drop_times),
+                              self._clock_error)
 
     def lock(self) -> None:
         """Adopt the current session and epoch: any change from here on is an event."""
@@ -444,14 +476,10 @@ class LiveRun:
         self.last_gaps = {}
         view = self.receiver.view(now)
         packet = view.packet
+        if view.clock_error is not None:
+            raise K1BridgeError(view.clock_error)
         if packet is None:
             return "no stream", math.inf
-        if view.clock_offset_s is None:
-            return "measuring the stream clock", math.inf
-        if abs(view.clock_offset_s) >= CLOCK_TOLERANCE_S:
-            raise K1BridgeError(f"the stream's clock differs from this PC's by "
-                                f"{view.clock_offset_s * 1e3:.1f} ms (must be < 20 ms): run the live "
-                                "tool on this PC (Docker with --network host)")
         if view.fresh_time is None or now - view.fresh_time >= STALE_S:
             return "stream stale", math.inf
         if packet.calibration_epoch == 0:
@@ -826,10 +854,9 @@ def is_requalification(ledger: Any, stage_key: str, identity: Mapping[str, str])
 def bridge_config(args: argparse.Namespace, record: AcceptanceRecord | None) -> K1BridgeConfig:
     approved = record.data.get("approved") if record is not None else None
     approved = approved if isinstance(approved, dict) else {}
-    defaults = K1BridgeConfig()
 
     def setting(given: float | None, key: str) -> Any:
-        return given if given is not None else approved.get(key, getattr(defaults, key))
+        return given if given is not None else approved.get(key, NO_RECORD[key])
 
     config = K1BridgeConfig(kp=setting(args.kp, "kp"), kd=setting(args.kd, "kd"),
                             speed_max_rad_s=setting(args.max_speed, "speed_max_rad_s"),
@@ -860,50 +887,70 @@ def open_rig(meta: Mapping[str, Any], model: Path | None) -> Any:
 
 
 def run_inputs(session: Any, args: argparse.Namespace) -> tuple[
-        Path | None, AcceptanceRecord | None, K1BridgeConfig, dict[str, Any]]:
-    """The model, record, bridge settings and gate settings of a run (refuses as a run would)."""
+        Path | None, AcceptanceRecord | None, K1BridgeConfig, dict[str, Any], list[str]]:
+    """The model, record, bridge settings, gate settings and summary warnings of a run
+    (refuses as a run would).  The start gates are warnings: a missing acceptance
+    record and the stage gate's problems; practice is never gated."""
     commission.check_versions(session)
     real = session.meta["transport"] == "booster"
     model = commission.session_model(session, args.model)
     if real and model is None:
         raise commission.CommissionError("a real live run needs the K1 model (contact check, MJCF hash)")
     record = AcceptanceRecord.load(args.acceptance_record) if args.acceptance_record else None
+    config = bridge_config(args, record)  # a record that is given must still be valid
+    settings = gate_settings(config, sha256_file(model) if model else None)
+    warnings: list[str] = []
     if real and record is None:
-        raise commission.CommissionError("--acceptance-record is required on the real robot")
-    config = bridge_config(args, record)
-    return model, record, config, gate_settings(config, sha256_file(model) if model else None)
+        warnings.append("no acceptance record: attempt 049's settings unless given "
+                        "(kp 40, kd 2, 2 rad/s, 8 rad/s^2, 50 Hz)")
+    if real:
+        warnings += [f"stage gate live-arms@{args.stage}: {problem}" for problem in stage_gate().require(
+            f"live-arms@{args.stage}", ledger=ledger_for(session.meta),
+            identity=identity_of(session.meta), settings=settings)]
+    return model, record, config, settings, warnings
 
 
 def lock_reasons(session_path: Path, stage: str, record: Path | None) -> list[str]:
     """Why a live run of ``stage`` would be refused now (``[]``: it may start); the window
-    shows these.  Practice is never gated."""
+    shows these.  Stage-gate problems are not reasons any more: the run shows them as
+    warnings before Go."""
     try:
         session = commission.Session(session_path)
-        if session.meta["transport"] != "booster":
-            return []
         argv = ["--session", str(session_path), "--stage", stage]
         args = build_parser().parse_args(argv + (["--acceptance-record", str(record)] if record else []))
-        _model, _record, _config, settings = run_inputs(session, args)
-        return list(stage_gate().require(f"live-arms@{stage}", ledger=ledger_for(session.meta),
-                                         identity=identity_of(session.meta), settings=settings))
+        run_inputs(session, args)
+        return []
     except (commission.CommissionError, K1BridgeError, OSError, ValueError) as exc:
         return [str(exc)]
 
 
+def quick_session(args: argparse.Namespace) -> Any:
+    """Auto-check 1, part 1: the existing probe (read-only) makes a new session."""
+    root = Path(args.root)
+    before = set(root.iterdir()) if root.is_dir() else set()
+    print("Auto-check 1 (robot): probe, read-only", flush=True)
+    code = commission.run_probe(argparse.Namespace(
+        transport=args.transport, net=args.net, domain_id=args.domain_id, session=None, root=root,
+        model=args.model, seconds=QUICK_PROBE_S if args.transport == "booster" else None,
+        attested_robot_id=args.attested_robot_id, firmware=args.firmware))
+    made = [path for path in set(root.iterdir()) - before if (path / "session.json").is_file()] \
+        if root.is_dir() else []
+    if code != 0 or len(made) != 1:
+        raise commission.CommissionError("auto-check 1 (robot) failed: the probe did not pass "
+                                         "(see its checks above); fix it, then check again")
+    print(f"Auto-check 1 (robot): probe PASS, session {made[0]} (the quick start goes on; "
+          "ignore the probe's 'Next:' line)", flush=True)
+    return commission.Session(made[0])
+
+
 def run_live(args: argparse.Namespace) -> int:
-    session = commission.Session(args.session)
+    clock = time_namespace_problem()  # stream clock rule 1, before any stream input
+    if clock:
+        raise K1BridgeError(clock)
+    session = commission.Session(args.session) if args.session else quick_session(args)
     meta = session.meta
-    real = meta["transport"] == "booster"
-    model, record, config, settings = run_inputs(session, args)
+    model, record, config, settings, warnings = run_inputs(session, args)
     model_sha = settings["model_sha256"]
-    stage_key = f"live-arms@{args.stage}"
-    identity = identity_of(meta)
-    if real:  # practice is never gated and never writes real evidence
-        refused = stage_gate().require(stage_key, ledger=ledger_for(meta), identity=identity,
-                                       settings=settings)
-        if refused:
-            raise commission.CommissionError(f"the stage gate refuses {stage_key}:\n  "
-                                             + "\n  ".join(refused))
     receiver = StreamReceiver(model_hash=model_hash_prefix(model_sha) if model_sha else None,
                               limits=stream_limits(model))
     sock = open_stream(args.port)
@@ -916,7 +963,8 @@ def run_live(args: argparse.Namespace) -> int:
             rig = open_rig(meta, model)
             try:
                 rig.contact = contact_check(model) if model else None
-                return attempt(session, rig, receiver, args, config, settings, record)
+                return attempt(session, rig, receiver, args, config, settings, record,
+                               warnings=warnings)
             finally:
                 rig.transport.close()
     finally:
@@ -929,38 +977,142 @@ def checklist(stage: str) -> str:
     return CHECKLIST.format(stage=stage, roles=ROLES[stage], support=SUPPORT[stage])
 
 
+def head_available() -> bool:
+    """The head module (package C) is in this build; without it ``--no-head`` does nothing."""
+    try:
+        import mocap_g1.k1_head  # noqa: F401
+    except Exception:  # noqa: BLE001 - absent or broken: the window hides the tick box
+        return False
+    return True
+
+
+def robot_problems(rig: Any, config: K1BridgeConfig) -> list[str]:
+    """Auto-check 1 on the open connection (read-only): mode, fall state, a fresh joint
+    state, arm and head joints inside their ranges."""
+    transport, now = rig.transport, rig.clock()
+    mode, fall, state = transport.latest_mode(), transport.latest_fall(), transport.latest_state()
+    names = {value: name for name, value in ROBOT_MODES.items()}
+    allowed = " or ".join(names.get(value, str(value)) for value in sorted(config.allowed_modes))
+    found = []
+    if mode is None or mode.value not in config.allowed_modes:
+        found.append(f"robot mode is {names.get(mode.value, mode.value) if mode else 'unknown'}: "
+                     f"set {allowed} with the remote")
+    if fall is None or fall.value != FALL_READY:
+        found.append("the robot reports a fall (or no fall state): stand it up, then check again")
+    if state is None or not 0 <= now - state.receive_time_s < config.state_stale_timeout_s:
+        found.append("no fresh joint state from the robot")
+        return found
+    for name, low, high in robot_joint_ranges(commission.ROBOT):
+        if name in ARMS or name in HEAD_JOINTS:
+            value = state.positions[K1_JOINTS.index(name)]
+            if not low - RANGE_TOLERANCE_RAD <= value <= high + RANGE_TOLERANCE_RAD:
+                found.append(f"{name} {value:.3f} rad is outside its range {low:.2f} to {high:.2f}")
+    return found
+
+
+def check_stream(run: LiveRun) -> str | None:
+    """Auto-check 2 (read-only): the coarse gate's conditions once, within ``STREAM_CHECK_S``
+    (fresh, calibrated, tracking on, model, stream clock, arm gap)."""
+    start = run.rig.clock()
+    while True:
+        run.rig.sleeper(CONTROL_DT)
+        now = run.rig.clock()
+        run.pump(now)
+        problem, _gap = run.gate_problem(now)
+        if problem is None or now - start >= STREAM_CHECK_S:
+            return problem
+
+
+def go_summary(meta: Mapping[str, Any], args: argparse.Namespace, plan: Plan,
+               warnings: list[str], head: str) -> str:
+    """The one Go screen: what was checked, the settings, the per-attempt lines, warnings."""
+    config = plan.config
+    lines = [
+        ("REAL ROBOT" if meta["transport"] == "booster" else "PRACTICE (fake robot)")
+        + f" {meta.get('serial')}, firmware {meta.get('firmware')}",
+        "Auto-check 1 (robot): PASS (walking, not fallen, fresh joint state, joints in range)",
+        "Auto-check 2 (stream): PASS (fresh, calibrated, tracking on, model, clock, arm gap)",
+        f"Settings: kp {config.kp:g}, kd {config.kd:g}, speed cap {config.speed_max_rad_s:g} rad/s, "
+        f"acceleration cap {config.accel_max_rad_s2:g} rad/s^2, {1.0 / CONTROL_DT:g} Hz, "
+        f"stage {plan.stage}" + (f", drill {plan.drill}" if plan.drill else "")
+        + f", time limit {plan.time_limit_s:g} s",
+        f"Head follows: {head}",
+        f"Support: {args.support}",
+        "Strap: " + ("clear of both arms (full arm range)" if plan.strap_clear
+                     else f"NOT clear: shoulders stay within {HOIST_SHOULDER_RAD:g} rad of rest"),
+        f"Roles: {ROLES[plan.stage]}",
+        "The arms take over when the performer's arms match the robot's (gap < 0.4 rad for 1 s).",
+        "STOP: Ctrl-C here (or the window's STOP). The real stop is the remote: LT+BACK.",
+    ]
+    lines += ["Warnings:"] + [f"  - {text}" for text in warnings] if warnings else ["Warnings: none"]
+    return "\n".join(lines)
+
+
+def owner_go(args: argparse.Namespace, summary: str, warnings: list[str], session: Any,
+             settings: Mapping[str, Any]) -> dict[str, Any]:
+    """The owner's Go for exactly this summary, session and settings (no Go: refused)."""
+    text = "QUICK START SUMMARY\n" + summary
+    if args.go:
+        print(text, flush=True)
+        via = "--go"
+    elif commission.confirm(text + "\nGo starts the arms now."):
+        via = "question"
+    else:
+        raise commission.CommissionError("not confirmed")
+    return {"operator": args.operator or getpass.getuser(), "time": commission.now_iso(),
+            "via": via, "warnings": list(warnings), "session": str(session.path),
+            "settings": dict(settings), "summary": summary}
+
+
 def attempt(session: Any, rig: Any, receiver: StreamReceiver, args: argparse.Namespace,
             config: K1BridgeConfig, settings: dict[str, Any], record: AcceptanceRecord | None, *,
+            warnings: list[str] | tuple[str, ...] = (),
             pump: Callable[[float], None] | None = None) -> int:
-    """Checklist, attempt file, gate wait, takeover, follow, release, verdict."""
+    """Auto-checks, Go, attempt file, gate wait, takeover, follow, release, verdict."""
     meta = session.meta
     wait_for_readings(rig.transport, READINGS_TIMEOUT_S)
     problems = commission.identity_problems(rig, meta, args.attested_robot_id)
     if problems:
         raise commission.CommissionError("this is not the session's robot:\n  " + "\n  ".join(problems))
-    if not commission.confirm(checklist(args.stage)):
-        raise commission.CommissionError("not confirmed")
-    strap_clear = args.stage != "hoist" or commission.ask_yes(
-        "Strap clearance: is the hoist strap clear of both arms over their full range? "
-        "(no = shoulders stay within 0.6 rad of rest)")
+    problems = robot_problems(rig, config)
+    if problems:
+        raise commission.CommissionError("auto-check 1 (robot) failed; fix this, then check "
+                                         "again:\n  " + "\n  ".join(problems))
+    print("Auto-check 1 (robot): PASS", flush=True)
+    strap_clear = args.stage != "hoist" or not args.strap_not_clear
     plan = Plan(args.stage, args.drill, args.time_limit, strap_clear, config)
+    run = LiveRun(rig, receiver, plan, pump=pump)
+    problem = check_stream(run)
+    if problem:
+        raise commission.CommissionError(f"auto-check 2 (stream) failed: {problem}; fix it "
+                                         "(live tool, Calibrate, Tracking on, arms down), then "
+                                         "check again")
+    print("Auto-check 2 (stream): PASS", flush=True)
+    head = ("off" if args.no_head else "on") if head_available() else "off (no head code in this build)"
+    go = owner_go(args, go_summary(meta, args, plan, list(warnings), head), list(warnings),
+                  session, settings)
     run_settings = {"stage": args.stage, "drill": args.drill, "time_limit_s": args.time_limit,
                     "strap_clear": strap_clear, "kp": config.kp, "kd": config.kd,
                     "speed_max_rad_s": config.speed_max_rad_s, "accel_max_rad_s2": config.accel_max_rad_s2,
-                    "port": args.port, "roles": ROLES[args.stage],
-                    "coarse_gap_rad": COARSE_GAP_RAD, "align_speed_rad_s": ALIGN_SPEED_RAD_S}
+                    "port": args.port, "roles": ROLES[args.stage], "support": args.support,
+                    "head": head, "coarse_gap_rad": COARSE_GAP_RAD,
+                    "align_speed_rad_s": ALIGN_SPEED_RAD_S}
     started = session.start(plan.key, run_settings, {})
     started.data["gate_settings"] = settings
+    started.data["owner_go"] = go
     if plan.drill:
         started.data["expected_fault"] = {"drill": plan.drill, "fault": EXPECTED_FAULT[plan.drill]}
     rig.instrument()
     log_path = started.path.with_suffix(".jsonl")
     with log_path.open("w", encoding="utf-8") as log:
-        run = LiveRun(rig, receiver, plan, pump=pump, log=log)
+        run.log = log
         with sigint_gate() as gate:
             try:
                 gate.allow_interrupt()
-                why = run.wait_for_gate()
+                why = run.wait_for_gate()  # stream and joint state again, right before the takeover
+                changed = robot_problems(rig, config) if why is None else []
+                if changed:
+                    why = "the robot changed since the checks: " + "; ".join(changed)
             except K1BridgeError as exc:
                 why = str(exc)
             except KeyboardInterrupt:
@@ -1088,13 +1240,29 @@ def run_evaluate(args: argparse.Namespace) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--session", type=Path, required=True, help="the folder probe created")
+    parser.add_argument("--session", type=Path,
+                        help="a session folder probe created (default: the quick start probes "
+                             "the robot and makes a new one)")
+    parser.add_argument("--transport", choices=("fake", "booster"), default="fake",
+                        help="quick start: fake = the practice robot, booster = the real K1")
+    parser.add_argument("--net", default="", help="quick start, booster: this PC's interface or IP")
+    parser.add_argument("--domain-id", type=int, default=0, help="quick start: DDS domain")
+    parser.add_argument("--root", type=Path, default=commission.commissioning_root(),
+                        help="quick start: where the new session is made")
+    parser.add_argument("--firmware", help="quick start, with --attested-robot-id: the firmware")
+    parser.add_argument("--go", action="store_true",
+                        help="the owner's Go: start after the two auto-checks without asking")
+    parser.add_argument("--no-head", action="store_true", help="the head does not follow")
+    parser.add_argument("--support", default=SUPPORT_DEFAULT,
+                        help=f"how the robot is held (Go screen; default: {SUPPORT_DEFAULT})")
+    parser.add_argument("--strap-not-clear", action="store_true",
+                        help="hoist: the strap may touch the arms (shoulders stay within 0.6 rad)")
     parser.add_argument("--stage", choices=("hoist", "standing"), default="hoist")
     parser.add_argument("--drill", choices=DRILLS,
                         help="stream-loss: stop the live tool while following; stop: press STOP")
     parser.add_argument("--evaluate", action="store_true",
                         help="judge the session against the stage PASS and write the ledger entry")
-    parser.add_argument("--operator", help="with --evaluate: who signs the ledger entry")
+    parser.add_argument("--operator", help="who gives the Go; with --evaluate: who signs the ledger")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT, help="loopback UDP port")
     parser.add_argument("--time-limit", type=float, default=TIME_LIMIT_S,
                         help=f"seconds of following (max {MAX_TIME_LIMIT_S:g})")
@@ -1117,6 +1285,8 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--port must be 1024-65535")
     if args.evaluate and not args.operator:
         parser.error("--evaluate needs --operator")
+    if args.evaluate and args.session is None:
+        parser.error("--evaluate needs --session")
     try:
         return run_evaluate(args) if args.evaluate else run_live(args)
     except (commission.CommissionError, K1BridgeError) as exc:

@@ -45,6 +45,7 @@ from mocap_g1.live_filter import (
 )
 from mocap_g1.io_utils import sha256_file
 from mocap_g1.k1_live_packet import LivePacketSender, parse_stream_url
+from mocap_g1.time_namespace import time_namespace_problem
 from mocap_g1.live_arm_alignment import ArmAlignmentError, LiveArmAlignment, floor_offset_m
 from mocap_g1.live_arm_clearance import ArmAbduction, abduct_frame_rotations
 from mocap_g1.live_ik import configure_live_ik_limits, install_solve_ik_fix
@@ -189,9 +190,13 @@ def _robot_stream_address(args: argparse.Namespace,
     if args.robot != "booster_k1":
         parser.error("--robot-stream is for --robot booster_k1 only")
     try:
-        return parse_stream_url(args.robot_stream)
+        address = parse_stream_url(args.robot_stream)
     except ValueError as exc:
         parser.error(f"--robot-stream: {exc}")
+    clock = time_namespace_problem()  # the bridge reads this PC's monotonic clock
+    if clock:
+        parser.error(f"--robot-stream: {clock}")
+    return address
 
 
 def build_parser() -> argparse.ArgumentParser:

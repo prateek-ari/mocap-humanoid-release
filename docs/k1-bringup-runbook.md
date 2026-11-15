@@ -120,14 +120,28 @@ Setup console (step 13). From a terminal:
 .venv/bin/python tools/control/k1_commission_gui.py
 ```
 
-A window with the thirteen steps as buttons. It needs a screen and Tk (**Install Tk** in step 13,
+A window that opens on the **Quick start** (live arms after two automatic checks and your Go);
+the thirteen steps are under **Advanced tests**. It needs a screen and Tk (**Install Tk** in step 13,
 or `sudo apt install python3-tk`; `install.sh --with-booster --system-packages` installs it).
 Only one test window opens at a time: a second launch (menu, console or terminal) says "already
 open, or an install is running" and exits. The installer refuses to run while the window is open
 ("Close the K1 test window first"), because it changes the Python environment the window runs on.
 Shutting down the Setup console does not close the window or stop a running step. It does not move the
 robot by itself: each step runs the same `k1_commission.py` command as this guide (step 12 runs
-`k1_arm_bridge.py`, step 13 runs `k1_live_bridge.py`), with the same checks, limits and evidence.
+`k1_arm_bridge.py`, step 13 and the quick start run `k1_live_bridge.py`), with the same checks,
+limits and evidence.
+
+- **Quick start (first screen):** set the robot connection (next item), **Stage**, **Time
+  limit**, **Stream port**, **Support** (default "held by a person"), your name, optionally the
+  **Acceptance record**, **Strap clear of both arms** (hoist; untick: shoulders stay within 0.6 rad
+  of rest) and **Head follows** (shown only when the head code is in this build). **Check robot
+  and stream** probes the robot read-only (a new session), checks it (walking, not fallen, fresh
+  joint state, joints in range) and the suit stream (fresh, calibrated, tracking on, model, clock,
+  the performer's arms within 0.4 rad of the robot's), then shows a summary with any warnings
+  (stage-gate problems, no acceptance record) and one **Go** button. A failed check says what to
+  fix and the button becomes **Re-check**; there is no Go. Changing a setting while Go is shown
+  clears it (press **Re-check**). **STOP** works as in the steps. Practice: **Start practice
+  sender** streams a slow pattern instead of the suit.
 
 - **Top bar:** grey **PRACTICE** (fake robot) or red **REAL ROBOT**. The real stop is always the
   remote: LT+BACK.
@@ -172,9 +186,9 @@ robot by itself: each step runs the same `k1_commission.py` command as this guid
   arms](#k4--live-arms-k1_live_bridgepy)). Choose **Stage** (`hoist`, or `standing` once the gate
   allows it), **Time limit** (seconds of following, default 120, max 600), **Stream port** (default
   47011, the live tool's `--robot-stream` port) and **Run**: **Following**, **Stream-loss drill** or
-  **STOP drill**. On the real robot, a stage the gate refuses is locked: the panel lists the reasons
-  (for example "S1r · K3 replay standing: no PASS for this robot") and **Run step** stays grey.
-  Practice is never locked.
+  **STOP drill**. Stage-gate problems (for example "S1r · K3 replay standing: no PASS for this
+  robot") are warnings on the Go screen, not a lock; only a real refusal (an invalid acceptance
+  record, a changed K1 model) keeps **Run step** grey.
   - While it runs, a coloured bar above the log shows the stream: state (waiting, aligning,
     following, lag-hold, stopping, released), packets per second, the age of the newest suit frame,
     the calibration epoch, tracking on/off, the arm joint furthest from its target, the seconds of
@@ -603,22 +617,39 @@ head tracking and whole-body tracking on the K1 are later work and not in this r
 ## K4 · live arms (`k1_live_bridge.py`)
 
 The live tool sends each accepted, filtered K1 arm reference over UDP on this PC; the bridge
-follows it behind the same envelope, motion lock, contact check and acceptance record as replay.
-On the real robot the stage gate must allow `live-arms@hoist` (after `replay@hoist`) or
-`live-arms@standing` (after `replay@standing`). Practice on the fake robot is never locked and
-writes only the PRACTICE ledger.
+follows it behind the same envelope, motion lock and contact check as replay.
+
+**Quick start (owner decision 2026-11-15).** One command from cold: without `--session` the bridge
+runs the probe (read-only, a new session), auto-check 1 (robot: walking, not fallen, fresh joint
+state, arm and head joints in range) and auto-check 2 (stream: fresh, calibrated, tracking on,
+model, clock, the performer's arms within 0.4 rad), prints a summary and starts on your Go:
+`--go`, else it asks once. No Go, no motion. Stage-gate problems and a missing acceptance record
+are warnings in the summary; without a record the run uses attempt 049's settings (kp 40, kd 2,
+2 rad/s, 8 rad/s^2, 50 Hz). A record that is given must still be valid. The attempt file stores
+`owner_go` (operator, time, the warnings shown, the settings). Replay (`k1_arm_bridge.py`) works the
+same way: warnings plus Go; a run that started with warnings writes no ledger PASS.
 
 ```bash
 # 1. the live simulation with the stream on: in the Setup console, step 07, tick
 #    "Send the arms to the K1 window"; or from a terminal (Docker, --network host):
 source session.env
 bash tools/xsens/live_operator.sh gmr --robot booster_k1 --robot-stream udp://127.0.0.1:47011
-# 2. the bridge, in the session from probe (fake session = practice robot)
-.venv/bin/python tools/control/k1_live_bridge.py --session <DIR> --stage hoist \
-    --acceptance-record <k1-acceptance.json>         # real robot only
+# 2. the bridge from cold (fake = practice robot), checks, summary, Go
+.venv/bin/python tools/control/k1_live_bridge.py --transport booster --net <PC address> \
+    --operator "<name>" --go [--acceptance-record <k1-acceptance.json>] [--no-head]
+#    or in an existing session (no probe)
+.venv/bin/python tools/control/k1_live_bridge.py --session <DIR> --stage hoist
 # practice without the suit: a slow pattern instead of the live tool
 .venv/bin/python tools/control/k1_live_synth.py --port 47011 --seconds 120
 ```
+
+- **Stream clock (no operator step).** The live tool and the bridge must read one clock: both
+  refuse to run in a time namespace with a monotonic offset (`/proc/self/timens_offsets`). The
+  delay between the suit sample and this PC counts as age against the same 0.1 s bound at the
+  start and during the run (attempt 046's 26 ms under load now runs). A packet stamped more than
+  2 ms ahead of this PC's clock is a clock mismatch: refused before the takeover, a normal stop
+  after it. The stream is also stale when the suit sample counter has not advanced for 0.1 s on
+  this PC's clock, whatever the sender's time says.
 
 - **One run = one takeover/release cycle.** The arms take over only when the stream is fresh,
   Calibrate was done, Tracking is on and the performer's arms are within 0.4 rad of the robot's
@@ -628,8 +659,8 @@ bash tools/xsens/live_operator.sh gmr --robot booster_k1 --robot-stream udp://12
   A performer more than 1.0 rad ahead for 1.0 s makes the arms hold, then re-align at up to
   1.0 rad/s; after 6 s of that they stop. Stream loss: hold at 0.1 s, release at 0.1 s + braking time + 0.1 s (the bridge
   refuses speed and acceleration caps that make this longer than 1.5 s).
-- **Hoist.** Until you answer yes to the strap-clearance question, shoulder pitch and roll stay
-  within 0.6 rad of rest.
+- **Hoist.** With `--strap-not-clear` (window: untick **Strap clear of both arms**), shoulder
+  pitch and roll stay within 0.6 rad of rest. The default is the strap clear, as in attempt 049.
 - **Drills** are separate runs: `--drill stream-loss` (stop the live tool while the arms follow)
   and `--drill stop` (press STOP while the arms follow).
 - **Stage PASS:** `--evaluate --operator "<name>"` checks the session (600 s of following in runs
