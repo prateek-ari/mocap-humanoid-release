@@ -574,11 +574,20 @@ What the robot taught us, and what the tools now do about it:
   0.6 rad/s a recorded performer outran the arms within 35 s. At 1.0 rad/s the right elbow still
   hit the cap on fast moves (lag stop).
 - **Command loss.** With commands stopped for up to 1 s the arms drift only about 2 degrees.
+- **Why live arms differ from the suit (offline analysis).** The robot tracks our commands within
+  about 1 degree RMS with about 80 ms delay (kp 40). The gap is upstream: a recorded performer
+  (Session-002 on K1) exceeds 1 rad/s 7 % and 3 rad/s^2 16 % of the time, and the live tool's
+  One-Euro filter (2 Hz, beta 0.6) adds about 60-80 ms. Hence gains levels **L5** (0.75 rad at
+  2.0 rad/s, 8 rad/s^2) and **L6** (1.0 rad at 3.0 rad/s, 12 rad/s^2; covers ~99 % of that take;
+  the arm motors are rated 33.5 rad/s, 14 Nm), lag policy 0.5 rad / 0.5 s / 6 s (was 0.35 / 0.5 / 3),
+  and for the robot run the live tool with `--filter-min-cutoff 3 --filter-beta 1.5`.
+  Each live-arms log row now also records `target` (the performer's arm targets before the ramp,
+  lag policy and envelope), so target -> command -> measured can be compared offline.
 - **Takeover pose check.** `POSE_MATCH_RAD` is 0.10 rad (was 0.05): a hand-held robot sways.
 - **Signs** move 0.2 rad (0.1 was below the hold error at kp 20; 0.3 hit the torso in the contact
   check).
 - **New steps.** `tpose` (demo: arms out to the T-pose and back) and `sysid` (measurements for
-  offline tuning: `--test sweep|steps|sine|poses`, one `--joint` at a time, at 1.0 rad/s).
+  offline tuning: `--test sweep|steps|sine|poses`, one `--joint` at a time, at 3.0 rad/s and 12 rad/s^2).
 - **Flight recorder.** `tools/control/k1_flight_recorder.py [out_dir] [net]` saves every LowState
   (about 500 Hz: all 22 motors' q, dq, ddq, tau_est, temperature, lost, and the IMU) to `.npz`
   chunks, read-only. Its `t_monotonic` matches the live bridge log's `t`.

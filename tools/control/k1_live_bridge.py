@@ -89,7 +89,7 @@ FROZEN_PACKETS = 3
 # Takeover and lag policy (3.2, 10.3)
 COARSE_GAP_RAD, COARSE_S = 0.4, 1.0
 ALIGN_SPEED_RAD_S, ALIGNED_RAD, REALIGNED_S = 0.2, 0.1, 0.5
-LAG_GAP_RAD, LAG_S, LAG_STOP_S = 0.35, 0.5, 3.0
+LAG_GAP_RAD, LAG_S, LAG_STOP_S = 0.5, 0.5, 6.0  # was 0.35/0.5/3.0: lag stops on a K1 (2026-11-15)
 #: A stream that stays stale (late, never lost) holds the arms; this long, it stops them.
 LATE_STOP_S = 3.0
 AT_REST_RAD_S = 0.05
@@ -586,6 +586,8 @@ class LiveRun:
                "seq": view.packet.sequence if view.packet else None,
                "source_age_s": None if command is None else round(command.source_age_s, 4),
                "contact": None if command is None else command.contact,
+               # the performer's arm targets before the ramp, lag policy and envelope
+               "target": self.targets(view.packet) if view.packet else None,
                "command": None if command is None else command.positions,
                "velocities": None if command is None else command.velocities,
                "measured": state.arm_positions() if state else None,

@@ -120,7 +120,10 @@ POST_TAKEOVER_SIM_S = 0.10
 RELEASE_WATCH_S = 2.0
 #: Gains levels: (excursion rad, speed rad/s, acceleration rad/s^2).
 GAINS_LEVELS = {"L1": (0.10, 0.25, 1.0), "L2": (0.20, 0.45, 1.5), "L3": (0.30, 0.60, 2.0),
-                "L4": (0.45, 1.00, 3.0)}  # L4: live arms need more than 0.6 rad/s (2026-11-15)
+                "L4": (0.45, 1.00, 3.0),  # L4: live arms need more than 0.6 rad/s (2026-11-15)
+                # L5/L6: a recorded performer (Session-002 on K1) exceeds 1 rad/s 7 % and 3 rad/s^2 16 %
+                # of the time; 3 rad/s and 12 rad/s^2 cover ~99 %. Arm motors: 33.5 rad/s, 14 Nm.
+                "L5": (0.75, 2.00, 8.0), "L6": (1.00, 3.00, 12.0)}
 GAINS_MAX_ERROR_RAD, GAINS_P95_RAD = 0.2, 0.1
 SUSTAIN_TICKS = 5           # 0.1 s at 50 Hz
 COVERAGE = 0.9
@@ -1221,8 +1224,8 @@ def run_sysid(args: argparse.Namespace) -> int:
 
     key = f"sysid@{args.mode}@{args.test}@{args.joint or 'both'}@{args.amp:g}"
     return motion_step(args, key, [f"hold@{args.mode}"], {"test": args.test, "joint": args.joint,
-                       "amp": args.amp}, motion_config(args.mode, kp=args.kp, kd=args.kd, speed_max_rad_s=1.0,
-                                     accel_max_rad_s2=3.0),
+                       "amp": args.amp}, motion_config(args.mode, kp=args.kp, kd=args.kd, speed_max_rad_s=3.0,
+                                     accel_max_rad_s2=12.0),
                        sysid_plan(args.joint, args.test, args.amp), judge, next_step=None)
 
 
