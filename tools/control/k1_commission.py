@@ -100,6 +100,9 @@ HOLD_MAX_S = 60.0
 BALANCE_S = 30.0
 SIGNS_RAD = 0.10
 GAP_LEVELS = (0.1, 0.25, 0.5, 1.0)
+#: Slowest fall-state period the probe accepts. The real K1 (firmware 1.8.1.2) publishes it at
+#: 1 Hz; motion then treats a reading older than 3 periods as unknown (bridge_config).
+FALL_PERIOD_MAX_S = 1.5
 GAP_RECORD_MIN_S = 0.5
 GAP_DRIFT_RAD = 0.10
 GAP_START_DRIFT_RAD = 0.05
@@ -923,7 +926,7 @@ def run_probe(args: argparse.Namespace) -> int:
         "joint state arrives": report["low_state_period_s"] is not None,
         "robot mode readable": bool(report["robot_modes"]),
         "fall topic periodic": report["fall_messages"] >= 3 and fall_period is not None
-                               and fall_period <= 0.5,
+                               and fall_period <= FALL_PERIOD_MAX_S,
         "no malformed joint states": report["malformed_low_states"] == 0,
     }
     verdict = "PASS" if all(checks.values()) else "FAIL"

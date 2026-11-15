@@ -245,11 +245,17 @@ Watches the robot for 10 s without commanding it, and **starts a session**: a fo
 robot's serial and firmware, the SDK version and the K1 model; every later step checks that they
 have not changed.
 
-**PASS** when joint states arrive, the robot mode can be read, the fall-state topic is periodic,
-and no joint state is malformed. **If it fails:**
+**PASS** when joint states arrive, the robot mode can be read, the fall-state topic is periodic
+(at least once every 1.5 s; a K1 on firmware 1.8.1.2 sends it once a second, and motion steps then
+treat a fall reading older than 3 periods as unknown), and no joint state is malformed. **If it fails:**
 
 - No joint state: check the cable, `--net`, the PC firewall (DDS needs UDP multicast), the DDS
-  domain (`--domain-id`), and that no other program talks to the robot.
+  domain (`--domain-id`), and that no other program talks to the robot. Also check the PC's route
+  (`ip route get <robot IP>` must name the port wired to the robot), and that the robot's own DDS
+  profile includes its Ethernet address: on one K1 (firmware 1.8.1.2) the motion services used
+  `/opt/booster/config/dds_configs/single-board_configs/fastdds_profile_udp_only.xml`, which listed
+  only internal addresses, so an external PC saw no DDS at all until `192.168.10.102` was added
+  (back up the file, add the address, reboot the robot in damping). Ask Booster before you change it.
 - Fall topic "event-or-missing": motion stays blocked (a remembered "ready" is no proof the robot
   stands). Send the probe output to the developers.
 - The robot does not report its serial: read the serial and the firmware version in Booster's app
