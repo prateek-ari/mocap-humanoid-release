@@ -67,6 +67,7 @@ from mocap_g1.k1_bridge import (  # noqa: E402
     K1BridgeError,
     motion_lock,
 )
+from mocap_g1.k1_head import HEAD_JOINTS, HeadCommander, inhibit_on_release  # noqa: E402
 from mocap_g1.k1_live_packet import (  # noqa: E402
     PacketError,
     LivePacket,
@@ -121,7 +122,6 @@ TIME_LIMIT_S, MAX_TIME_LIMIT_S = 120.0, 600.0
 QUICK_PROBE_S = 5.0          # auto-check 1's read-only probe on the real robot
 STREAM_CHECK_S = 10.0        # auto-check 2 waits this long for the stream conditions
 SUPPORT_DEFAULT = "held by a person"
-HEAD_JOINTS = tuple(name for name in K1_JOINTS if "Head" in name)
 # Stage PASS and requalification
 PASS_FOLLOW_S, REQUALIFY_FOLLOW_S = 600.0, 120.0
 PASS_CYCLES = 5
@@ -396,6 +396,8 @@ class Plan:
     time_limit_s: float
     strap_clear: bool
     config: K1BridgeConfig
+    #: K6: the head follows a v3 stream (``--no-head``: no head call at all).
+    head: bool = True
 
     @property
     def key(self) -> str:
@@ -462,6 +464,8 @@ class LiveRun:
                                                  joints=ARMS)
         self.rest: dict[str, float] = {}
         self.last_gaps: dict[str, float] = {}
+        #: K6 head commander (mocap_g1/k1_head.py), started after the takeover.
+        self.head: HeadCommander | None = None
         self._status_at = -math.inf
         self._rate_mark: tuple[float, int] | None = None
 
@@ -533,6 +537,7 @@ class LiveRun:
         start = self.rig.clock()
         steps = int(math.ceil((self.plan.time_limit_s + 2 * GATE_WAIT_S) / CONTROL_DT))
         paced = not isinstance(self.rig.clock, commission.VirtualClock)
+        self.start_head(threaded=paced)
         ticks: Any = (iter_dds_replay_ticks(steps=steps, control_dt=CONTROL_DT, start_time=start,
                                             clock=self.rig.clock, sleeper=self.rig.sleeper)
                       if paced else range(steps))
@@ -590,6 +595,11 @@ class LiveRun:
                 break
             source_time = view.fresh_time if view.fresh_time is not None else -math.inf
             step = bridge.step(command, source_timestamp=source_time, now=now, enable=enable)
+            if self.head is not None:  # the lease: target and "arms are following"
+                self.head.feed(now, packet.head,
+                               following=phase == "following" and step.reason == "tracking")
+                if not paced:
+                    self.head.tick(now)
             if phase == "hold" and step.command is not None and all(
                     abs(v) < AT_REST_RAD_S for v in step.command.velocities.values()):
                 phase, aligned_since = "realign", None
@@ -610,6 +620,38 @@ class LiveRun:
             result.trigger = "run_limit"  # never reached the following time limit
         return result
 
+    def start_head(self, *, threaded: bool) -> None:
+        """The head commander on the transport's own head RPC backend; every arm release
+        inhibits it first.  None with ``--no-head`` or a transport without a head backend."""
+        backend = getattr(self.rig.transport, "head_rpc", None)
+        rpc = backend() if self.plan.head and backend is not None else None
+        if rpc is None:
+            return
+        self.head = HeadCommander(rpc, self.rig.transport.latest_state, clock=self.rig.clock)
+        inhibit_on_release(self.rig.transport, self.head)
+        if threaded:
+            self.head.start()
+
+    def end_head(self) -> None:
+        """After the arm release: the neutral only after a normal stop, then close the head."""
+        if self.head is not None:
+            self.head.finish(neutral=self.bridge.state == "released" and self.bridge.fault is None)
+
+    def head_summary(self) -> dict[str, Any]:
+        """Head state, calls and errors, and over the following ticks the p95 of
+        |target - command| and |command - measured| (rad, worst of yaw and pitch)."""
+        if self.head is None:
+            return {"state": "disabled" if not self.plan.head else "none"}
+        rows = [row["head"] for row in self.result.rows
+                if row["phase"] == "following" and row.get("head") and row["head"]["command"]]
+
+        def p95(a: str, b: str) -> float | None:
+            return _percentile([max(abs(row[a][n] - row[b][n]) for n in HEAD_JOINTS)
+                                for row in rows if row[a] and row[b]], 95)
+
+        return {**self.head.summary(), "target_command_p95_rad": p95("target", "command"),
+                "command_measured_p95_rad": p95("command", "measured")}
+
     def record(self, now: float, phase: str, step: Any, view: StreamView) -> None:
         state = self.rig.transport.latest_state()
         command = step.command
@@ -624,6 +666,10 @@ class LiveRun:
                "measured": state.arm_positions() if state else None,
                "measured_t": state.receive_time_s if state else None,
                "errors": self.bridge.tracking_errors(state) if state else None}
+        head = self.head
+        if head is not None:
+            row["head"] = {"state": head.status, "target": head.target, "command": head.command,
+                           "measured": state.head_positions() if state else None}
         self.result.rows.append(row)
         if self.log is not None:
             self.log.write(json.dumps(row) + "\n")
@@ -647,7 +693,9 @@ class LiveRun:
                   "enabled": bool(packet.enabled) if packet else None,
                   "worst_joint": worst, "worst_gap_rad": round(gaps[worst], 3) if gaps and worst else None,
                   "following_s": round(self.result.follow_s, 1), "time_limit_s": self.plan.time_limit_s,
-                  "bridge": self.bridge.state, "release": release_state(self.rig), **extra}
+                  "bridge": self.bridge.state, "release": release_state(self.rig),
+                  "head": self.head.status if self.head is not None
+                  else ("disabled" if not self.plan.head else "none"), **extra}
         try:
             STATUS(fields)
         except OSError:  # a status line must never stop the control loop or the release
@@ -703,7 +751,7 @@ def summarize(plan: Plan, run: LiveRun, *, release_confirmed: bool, rpc_seconds:
         "fall": int(fault.startswith("fall_state")),
         "source_age_p50_s": _percentile(ages, 50), "source_age_p95_s": _percentile(ages, 95),
         "stream": run.receiver.statistics(), "release_rpc_s": rpc_seconds,
-        "strap_clear": plan.strap_clear,
+        "strap_clear": plan.strap_clear, "head": run.head_summary(),
     }
     if plan.drill == "stream-loss":
         summary["drill"] = stream_loss_checks(plan, result, release_confirmed, rpc_seconds)
@@ -1080,7 +1128,8 @@ def attempt(session: Any, rig: Any, receiver: StreamReceiver, args: argparse.Nam
                                          "again:\n  " + "\n  ".join(problems))
     print("Auto-check 1 (robot): PASS", flush=True)
     strap_clear = args.stage != "hoist" or not args.strap_not_clear
-    plan = Plan(args.stage, args.drill, args.time_limit, strap_clear, config)
+    plan = Plan(args.stage, args.drill, args.time_limit, strap_clear, config,
+                head=not args.no_head)
     run = LiveRun(rig, receiver, plan, pump=pump)
     problem = check_stream(run)
     if problem:
@@ -1162,6 +1211,7 @@ def follow(run: LiveRun, gate: Any, rig: Any) -> None:
     try:
         _follow(run, gate, rig)
     finally:
+        run.end_head()  # after the release: neutral (normal stop only), then close
         final_status(run, rig)
 
 

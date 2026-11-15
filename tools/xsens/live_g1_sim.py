@@ -44,6 +44,7 @@ from mocap_g1.live_filter import (
     upsampler_lag_ms,
 )
 from mocap_g1.io_utils import sha256_file
+from mocap_g1.k1_head import HEAD_JOINTS, HeadReference, relative as head_relative
 from mocap_g1.k1_live_packet import LivePacketSender, parse_stream_url
 from mocap_g1.time_namespace import time_namespace_problem
 from mocap_g1.live_arm_alignment import ArmAlignmentError, LiveArmAlignment, floor_offset_m
@@ -768,6 +769,8 @@ class LiveLoop:
         self.pending_timeline: FrameTimeline | None = None
         self.last_root: np.ndarray = np.zeros(7, dtype=np.float64)
         self.last_human_frame: Any = None
+        #: K1 only (K6): the performer's head yaw and pitch, written into the reference.
+        self.head: HeadReference | None = None
 
     def _measured_dof(self) -> np.ndarray:
         return np.asarray(self.viewer.data.qpos[7:], dtype=np.float64)
@@ -886,13 +889,20 @@ class LiveLoop:
         if self.arm_alignment is None:
             print("ARM ALIGNMENT unavailable for this retargeter", file=sys.stderr)
             return
-        arms_done = False  # calibrate() either raises with the old offsets restored, or applies new ones
+        # calibrate() either raises with the old offsets restored, or applies new ones; arms_done
+        # also counts a new head neutral, so a later floor failure still bumps the epoch.
+        arms_done = False
+        head = self.head
         try:
             offsets = {}
+            head_neutral = head_relative(self.pending_frame) if head is not None else None
             if self.arm_alignment.mode != "config":
                 offsets = self.arm_alignment.calibrate(
                     abduct_frame_rotations(self.pending_frame, self.abduction_deg)
                 )
+                arms_done = True
+            if head is not None:  # the same step as the arm offsets: both new, or both old
+                head.rel0 = head_neutral
                 arms_done = True
             floor = ""
             if self.feet:
@@ -931,13 +941,19 @@ class LiveLoop:
         if calibrate:
             self.calibrate_arms()
         timeline = self.pending_timeline
+        head = self.head
         try:
-            qpos = np.asarray(
+            if head is not None:  # GMR may change the frame in place: keep the two segments first
+                frame_for_head = {name: (None, np.array(self.pending_frame[name][1]))
+                                  for name in ("Chest", "Head")}
+            qpos = np.array(
                 self.retargeter.retarget(self.pending_frame, offset_to_ground=False),
                 dtype=np.float64,
             )
             if qpos.shape != (self.expected_nq,) or not np.isfinite(qpos).all():
                 raise ValueError(f"GMR returned invalid qpos shape/content: {qpos.shape}")
+            if head is not None:  # before the filter: the MuJoCo view and the packet agree
+                head.write(frame_for_head, qpos)
         except Exception as exc:  # upstream solver errors are frame-local
             self._report_failure(f"Retargeting failed: {exc}")
             self._clear_pending()
@@ -1198,7 +1214,8 @@ def main(argv: list[str] | None = None) -> int:
                 return 2
             robot_stream = LivePacketSender(
                 stream_address, model_sha256=sha256_file(Path(xml)), clock=time.monotonic,
-                arm_indices=[robot.dof_joints.index(name) for name in K1_UPPER_BODY_JOINTS])
+                arm_indices=[robot.dof_joints.index(name) for name in K1_UPPER_BODY_JOINTS],
+                head_indices=[robot.dof_joints.index(name) for name in HEAD_JOINTS])
         viewer = RobotMotionViewer(
             robot_type=args.robot,
             motion_fps=args.control_rate,
@@ -1233,10 +1250,12 @@ def main(argv: list[str] | None = None) -> int:
             control=StdinControl(controls) if args.control_stdin else None,
         )
         loop.robot_stream = robot_stream
+        if robot.key == "booster_k1":  # K6: simulation first, with or without --robot-stream
+            loop.head = HeadReference([robot.dof_joints.index(name) for name in HEAD_JOINTS])
         loop.start()
         if robot_stream is not None:
             print(f"ROBOT STREAM to {stream_address[0]}:{stream_address[1]} (session "
-                  f"{robot_stream.session_id}): accepted, filtered K1 arm references.")
+                  f"{robot_stream.session_id}): accepted, filtered K1 arm and head references (v3).")
 
         if hardware_envelope:
             print(

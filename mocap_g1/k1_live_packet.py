@@ -10,7 +10,10 @@ little-endian struct (``FORMAT``, 136 bytes):
     switch), the first 8 bytes of the K1 MJCF SHA-256, the first 8 bytes of the
     joint-order hash, then the 8 K1 arm targets in ``K1_UPPER_BODY_JOINTS`` order.
 
-Root pose waits for v2 (K5).  This module only encodes and checks structure;
+Packet v3 (K6 head, ``FORMAT_V3``, 152 bytes) appends the head target: yaw, then
+pitch (rad).  Version 2 is K5's root packet (its branch); the decoder tells the
+versions apart by size and checks the version against it.  This module only
+encodes and checks structure;
 the bridge (tools/control/k1_live_bridge.py) applies the stream rules.
 """
 
@@ -29,19 +32,24 @@ import time
 from typing import Any
 from urllib.parse import urlsplit
 
+from .k1_head import HEAD_JOINTS, HEAD_RANGES
 from .live_robots import K1_UPPER_BODY_JOINTS
 
 MAGIC = b"K1LV"
 VERSION = 1
+VERSION_HEAD = 3
 FORMAT = "<4sHHQQddIIIB3x8s8s8d"
+FORMAT_V3 = FORMAT + "2d"
 SIZE = struct.calcsize(FORMAT)
+SIZE_V3 = struct.calcsize(FORMAT_V3)
+SIZES = {SIZE: VERSION, SIZE_V3: VERSION_HEAD}
 ARM_COUNT = len(K1_UPPER_BODY_JOINTS)
-if SIZE >= 512 or ARM_COUNT != 8:
+if SIZE_V3 >= 512 or ARM_COUNT != 8:
     raise ImportError("K1 live packet layout changed: fix FORMAT")
 
 
 class PacketError(ValueError):
-    """A datagram that is not a valid v1 packet; the message is the drop reason."""
+    """A datagram that is not a valid v1/v3 packet; the message is the drop reason."""
 
 
 def joint_order_hash(names: Sequence[str] = K1_UPPER_BODY_JOINTS) -> bytes:
@@ -67,6 +75,8 @@ class LivePacket:
     model_hash: bytes
     joint_order: bytes
     targets: tuple[float, ...]
+    #: v3 only: the head target (yaw, pitch) in rad.
+    head: tuple[float, float] | None = None
 
     def arm_targets(self) -> dict[str, float]:
         return dict(zip(K1_UPPER_BODY_JOINTS, self.targets))
@@ -75,30 +85,41 @@ class LivePacket:
 def encode(packet: LivePacket) -> bytes:
     if len(packet.targets) != ARM_COUNT:
         raise PacketError(f"need {ARM_COUNT} arm targets, got {len(packet.targets)}")
-    return struct.pack(FORMAT, MAGIC, VERSION, 0, packet.session_id, packet.sequence,
+    head = () if packet.head is None else tuple(packet.head)
+    if len(head) not in (0, 2):
+        raise PacketError("the head needs yaw and pitch")
+    return struct.pack(FORMAT_V3 if head else FORMAT, MAGIC, VERSION_HEAD if head else VERSION, 0,
+                       packet.session_id, packet.sequence,
                        packet.sender_monotonic_s, packet.suit_receive_s,
                        packet.sample_counter & 0xFFFFFFFF, packet.generation & 0xFFFFFFFF,
                        packet.calibration_epoch & 0xFFFFFFFF, 1 if packet.enabled else 0,
-                       packet.model_hash, packet.joint_order, *packet.targets)
+                       packet.model_hash, packet.joint_order, *packet.targets, *head)
 
 
 def decode(data: bytes) -> LivePacket:
-    """The packet in ``data``; raises :class:`PacketError` with the drop reason."""
-    if len(data) != SIZE:
-        raise PacketError(f"size {len(data)} != {SIZE}")
+    """The v1 or v3 packet in ``data``; raises :class:`PacketError` with the drop reason."""
+    expected = SIZES.get(len(data))
+    if expected is None:
+        raise PacketError(f"size {len(data)} is neither {SIZE} (v1) nor {SIZE_V3} (v3)")
     (magic, version, _reserved, session_id, sequence, sender, suit, counter, generation, epoch,
-     enabled, model, order, *targets) = struct.unpack(FORMAT, data)
+     enabled, model, order, *values) = struct.unpack(
+         FORMAT_V3 if expected == VERSION_HEAD else FORMAT, data)
     if magic != MAGIC:
         raise PacketError("magic")
-    if version != VERSION:
+    if version != expected:
         raise PacketError(f"version {version}")
     if enabled not in (0, 1):
         raise PacketError("enabled flag")
-    values = (sender, suit, *targets)
-    if not all(math.isfinite(value) for value in values):
+    if not all(math.isfinite(value) for value in (sender, suit, *values)):
         raise PacketError("non-finite")
+    targets, head = values[:ARM_COUNT], values[ARM_COUNT:]
+    for name, value in zip(HEAD_JOINTS, head):
+        lower, upper = HEAD_RANGES[name]
+        if not lower <= value <= upper:
+            raise PacketError("head range")
     return LivePacket(session_id, sequence, sender, suit, counter, generation, epoch,
-                      bool(enabled), model, order, tuple(targets))
+                      bool(enabled), model, order, tuple(targets),
+                      (head[0], head[1]) if head else None)
 
 
 def parse_stream_url(url: str) -> tuple[str, int]:
@@ -124,12 +145,17 @@ class LivePacketSender:
 
     def __init__(self, address: tuple[str, int], *, model_sha256: str,
                  arm_indices: Sequence[int], clock: Callable[[], float] = time.monotonic,
-                 sock: Any = None, session_id: int | None = None) -> None:
+                 sock: Any = None, session_id: int | None = None,
+                 head_indices: Sequence[int] | None = None) -> None:
         self.address = address
         self.model_hash = model_hash_prefix(model_sha256)
         self.arm_indices = tuple(arm_indices)
         if len(self.arm_indices) != ARM_COUNT:
             raise ValueError(f"need {ARM_COUNT} arm indices")
+        #: (yaw, pitch) indices into the reference: packet v3; ``None``: v1.
+        self.head_indices = None if head_indices is None else tuple(head_indices)
+        if self.head_indices is not None and len(self.head_indices) != 2:
+            raise ValueError("need 2 head indices (yaw, pitch)")
         self.clock = clock
         self.socket = sock if sock is not None else socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.session_id = session_id if session_id is not None else secrets.randbits(63) or 1
@@ -144,7 +170,9 @@ class LivePacketSender:
             data = encode(LivePacket(
                 self.session_id, self.sequence, float(self.clock()), float(suit_receive_s),
                 int(counter), int(generation), int(epoch), bool(enabled), self.model_hash,
-                joint_order_hash(), tuple(float(reference[index]) for index in self.arm_indices)))
+                joint_order_hash(), tuple(float(reference[index]) for index in self.arm_indices),
+                None if self.head_indices is None else (float(reference[self.head_indices[0]]),
+                                                        float(reference[self.head_indices[1]]))))
             self.socket.sendto(data, self.address)
         except Exception as exc:  # noqa: BLE001 - the stream is optional; the sim must go on
             self.failures += 1

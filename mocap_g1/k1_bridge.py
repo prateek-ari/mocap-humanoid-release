@@ -47,6 +47,7 @@ from typing import Any, Literal, get_args
 
 import numpy as np
 
+from .k1_head import HEAD_JOINTS, SimulatedHead, SimulatedHeadRpc
 from .k1_rpc_worker import DAMPING, MODE_QUERY, ROBOT_INFO, TAKEOVER, Deadline, RpcClosed, RpcWorker
 from .live_robots import K1_JOINTS, K1_UPPER_BODY_JOINTS
 from .safety import ArmSafetyEnvelope, SafetyCommand, SafetyConfig, SafetyError
@@ -61,6 +62,7 @@ FALL_DOWN_TOPIC = "rt/fall_down"
 MOTOR_COUNT = 22
 #: ``JointIndexK1`` of the SDK: head yaw/pitch 0-1, left arm 2-5, right arm 6-9, legs 10-21.
 ARM_MOTOR_INDEX = {name: index for index, name in enumerate(K1_JOINTS) if name in K1_UPPER_BODY_JOINTS}
+HEAD_MOTOR_INDEX = {name: K1_JOINTS.index(name) for name in HEAD_JOINTS}
 MOTOR_MODE = 0x0A
 #: ``ArmController``'s gains: the ceiling unless ``allow_gains_above_example``.
 EXAMPLE_KP, EXAMPLE_KD = 60.0, 3.0
@@ -132,6 +134,10 @@ class K1State:
     def arm_positions(self) -> dict[str, float]:
         return {name: self.positions[index] for name, index in ARM_MOTOR_INDEX.items()}
 
+    def head_positions(self) -> dict[str, float]:
+        """Head yaw and pitch (motors 0 and 1), moved by Booster's RotateHead."""
+        return {name: self.positions[index] for name, index in HEAD_MOTOR_INDEX.items()}
+
 
 @dataclass(frozen=True)
 class Reading:
@@ -186,8 +192,10 @@ class FakeK1Transport(K1Transport):
     """Deterministic in-process stand-in; ``rpc`` scripts the loco RPC outcomes.
 
     With ``streaming_clock`` it behaves like a robot that streams state: every
-    reading is timestamped now and the arm encoders follow the published
-    commands.  Without it, readings keep the time they were fed.
+    reading is timestamped now, the arm encoders follow the published commands
+    and the head follows ``RotateHead`` calls of :meth:`head_rpc` like a real K1
+    (:class:`~mocap_g1.k1_head.SimulatedHead`: 40 ms lag, one jump stops at
+    0.2 rad).  Without it, readings keep the time they were fed.
     """
 
     def __init__(self, *, rpc: Callable[[bool], None] | None = None,
@@ -199,6 +207,13 @@ class FakeK1Transport(K1Transport):
         self.fall: Reading | None = None
         self.rpc = rpc
         self._stream = streaming_clock
+        self.head: SimulatedHead | None = None
+
+    def head_rpc(self) -> SimulatedHeadRpc | None:
+        """The head's RPC backend (in-process, no SDK); ``None`` without a streaming clock."""
+        if self._stream is None or self.head is None:
+            return None
+        return SimulatedHeadRpc(self.head, self._stream)
 
     def publish(self, frame: K1Frame) -> None:
         self.published.append(frame)
@@ -210,7 +225,11 @@ class FakeK1Transport(K1Transport):
 
     def latest_state(self) -> K1State | None:
         if self._stream is not None and self.state is not None:
-            return K1State(self.state.positions, self._stream())
+            now = self._stream()
+            positions = self.state.positions
+            if self.head is not None:
+                positions = (*self.head.position(now), *positions[2:])
+            return K1State(positions, now)
         return self.state
 
     def latest_mode(self) -> Reading | None:
@@ -232,6 +251,8 @@ class FakeK1Transport(K1Transport):
              fall: int = FALL_READY) -> None:
         """Deliver one joint state, mode and fall reading at ``now``."""
         self.state = measured_state(positions, now)
+        if self._stream is not None and self.head is None and self.state is not None:
+            self.head = SimulatedHead(self.state.positions[0], self.state.positions[1], now)
         self.mode = Reading(mode, now)
         self.fall = Reading(fall, now)
 
@@ -387,6 +408,7 @@ class IsolatedBoosterTransport(BoosterTransport):
     RELEASE = Deadline(0.9, 2.0)
 
     def _start_loco(self, domain_id: int, network_interface: str) -> None:
+        self._loco_args = (domain_id, network_interface)
         self.rpc = RpcWorker(domain_id=domain_id, network_interface=network_interface,
                              clock=self._clock)
         self._release_end: float | None = None
@@ -463,6 +485,12 @@ class IsolatedBoosterTransport(BoosterTransport):
 
     def robot_info(self) -> dict[str, str]:
         return dict(self._loco("GetRobotInfo", (), ROBOT_INFO))
+
+    def head_rpc(self) -> RpcWorker:
+        """A second isolated worker for the head (K6): a slow head call never waits in
+        front of a release.  The head commander owns and closes it."""
+        domain_id, network_interface = self._loco_args
+        return RpcWorker(domain_id=domain_id, network_interface=network_interface, clock=self._clock)
 
     def close(self) -> None:
         super().close()

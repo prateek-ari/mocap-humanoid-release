@@ -47,7 +47,8 @@ applies to it.
 | hoist | a frame and strap that holds the robot up and catches it if it falls |
 | damping mode | Booster's safe mode: the joints go soft and only resist fast motion (remote LT+BACK) |
 | prepare / walking mode | Booster's standing modes, set with the remote; in walking mode Booster balances the robot |
-| takeover / release | this PC takes the arms from Booster's controller (`UpperBodyCustomControl(true)`) and gives them back (`false`); Booster keeps the head and legs |
+| takeover / release | this PC takes the arms from Booster's controller (`UpperBodyCustomControl(true)`) and gives them back (`false`); Booster keeps the legs and owns the head (K6 moves it only through `RotateHead`) |
+| head follows | the K1 head turns with the performer's head (yaw and pitch) through Booster's `RotateHead`; Booster keeps control of the head |
 | kp / kd | how stiffly the arm motors hold their commanded angle (kp) and how much they resist speed (kd) |
 | safety envelope | the layer in this software that limits every arm command's speed, acceleration and range |
 | tracking error | the difference between the measured joint angle and the closest angle commanded in the last 0.5 s (the K1's arms follow about 0.1 s late; since 2026-11-15 a late but faithful arm is not an error) |
@@ -608,11 +609,12 @@ What the robot taught us, and what the tools now do about it:
 
 ## After day one
 
-The robot moves in this release only through the stage ladder: S0 (steps 1-11, the acceptance
-record), S0r replay on the hoist (step 12), S1 live arms on the hoist (step 13), S1r replay
-standing, S2 live arms standing. Each stage stays locked until the one before it passed for this
-robot. Keep the robot on the hoist for S0r and S1, and use a spotter when it stands free. Walking,
-head tracking and whole-body tracking on the K1 are later work and not in this release.
+The stage ladder stays as a record of what passed: S0 (steps 1-11, the acceptance record), S0r
+replay on the hoist (step 12), S1 live arms on the hoist (step 13), S1r replay standing, S2 live
+arms standing. Since 2026-11-15 a stage that is not passed yet is a warning before Go, not a lock
+(see the quick start in [K4 · live arms](#k4--live-arms-k1_live_bridgepy)). Keep the robot held
+or on the hoist, and use a spotter when it stands free. Head tracking is in this release
+([Head (K6)](#head-k6)); walking and whole-body tracking on the K1 are later work.
 
 ## K4 · live arms (`k1_live_bridge.py`)
 
@@ -669,3 +671,33 @@ bash tools/xsens/live_operator.sh gmr --robot booster_k1 --robot-stream udp://12
   drills PASS) and writes the ledger entry. After a firmware or SDK change, 120 s and the drills
   requalify a stage that passed before.
 - **In the test window** this is step 13 (see [The test window](#the-test-window)).
+
+### Head (K6)
+
+The K1 head follows the performer's head yaw (left, right) and pitch (up, down). Roll is ignored:
+the K1 head has no roll.
+
+- **How.** The live tool sends the two angles with the arm reference. The bridge sends them to
+  Booster's `RotateHead(pitch, yaw)` at 50 Hz. Booster keeps control of the head: our arm command
+  keeps the head gain at 0. Attempt 055 showed that `RotateHead` works while the arms are custom.
+  The head has its own command thread and its own connection, so a slow head call never delays an
+  arm command or the arm release.
+- **On by default.** Switch it off with `--no-head`, or untick **Head follows** in the window. Then
+  the bridge sends no head command at all.
+- **Zero.** Calibrate with the performer's head straight in the calibration pose. That head
+  position becomes the head's zero.
+- **Limits.** Yaw ±0.95 rad, pitch −0.264…0.744 rad (positive pitch = looking down), speed 2 rad/s.
+  The start ramps at 0.5 rad/s from the robot's real head position, so the head never jumps.
+- **The head holds** (stays where it is) while the arms align, while the arms hold for lag, and
+  when the stream is stale (no new packet for 0.1 s).
+- **At the end.** After a normal end or STOP, the head returns to straight (one 1 s move, after
+  the arms are released). After a fall or a fault there is no head command at all.
+- **A head problem is not an arm stop.** If head commands fail for 0.5 s, only the head switches
+  off for this run: the status shows `head off` and the arms continue.
+- **First check on the real robot (not yet done).** On the practice robot with the real Xsens
+  capture (2026-11-15) the head ran 120 s: 6000 head commands, 0 failures, straight after the
+  release. The real robot has not run it. Hold the robot as for the arms, then turn the
+  performer's head **slowly** left, right, up and down. Confirm that the robot's head looks the
+  same way each time (performer looks left: the robot looks to its left; performer looks down: the
+  robot looks down). If a direction is wrong, press STOP and run again with `--no-head` (or
+  untick **Head follows**).

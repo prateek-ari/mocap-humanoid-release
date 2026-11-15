@@ -8,6 +8,7 @@ arm joint toward the middle of its range and back, so the bridge's coarse gate o
     python3 tools/control/k1_live_synth.py --port 47011 --seconds 60
     python3 tools/control/k1_live_synth.py --port 47011 --motion k1-preview.pkl --model K1_serial.xml
     python3 tools/control/k1_live_synth.py --port 47011 --seconds 20   # then it stops: a stream-loss drill
+    python3 tools/control/k1_live_synth.py --port 47011 --head   # packet v3: plus a head sine (K6)
 
 Pickles are trusted local input only: loading one runs code.  Exit status 0, or 2
 for invalid input.
@@ -47,6 +48,16 @@ def pattern(amplitude: float, period_s: float) -> Callable[[float], list[float]]
                                                      middle - REST[name]))
         return values
     return frame
+
+
+#: ``--head``: yaw 0.4 sin(2π t / 4 s), pitch 0.2 sin(2π t / 6 s) from 0 (inside the K1 head range).
+HEAD_YAW_RAD, HEAD_YAW_PERIOD_S, HEAD_PITCH_RAD, HEAD_PITCH_PERIOD_S = 0.4, 4.0, 0.2, 6.0
+
+
+def head_sine(t: float) -> list[float]:
+    """Head ``[yaw, pitch]`` at ``t`` seconds."""
+    return [HEAD_YAW_RAD * math.sin(2.0 * math.pi * t / HEAD_YAW_PERIOD_S),
+            HEAD_PITCH_RAD * math.sin(2.0 * math.pi * t / HEAD_PITCH_PERIOD_S)]
 
 
 def motion(path: Path) -> tuple[Callable[[float], list[float]], float]:
@@ -89,6 +100,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--period", type=float, default=6.0, help="pattern period (s)")
     parser.add_argument("--epoch", type=int, default=1, help="calibration epoch (0 = uncalibrated)")
     parser.add_argument("--disabled", action="store_true", help="send tracking off")
+    parser.add_argument("--head", action="store_true",
+                        help="packet v3: add a head yaw/pitch sine (K6 practice)")
     args = parser.parse_args(argv)
     if not (1 <= args.port <= 65535 and 1.0 <= args.rate <= 500.0 and args.seconds > 0
             and args.period > 0 and args.amplitude >= 0):
@@ -99,8 +112,12 @@ def main(argv: list[str] | None = None) -> int:
     except (ValueError, OSError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
+    if args.head:
+        arms = frame
+        frame = lambda t: [*arms(t), *head_sine(t)]  # noqa: E731
     sender = LivePacketSender(("127.0.0.1", args.port), arm_indices=range(len(ARMS)),
-                              model_sha256=sha256_file(args.model) if args.model else NO_MODEL_SHA)
+                              model_sha256=sha256_file(args.model) if args.model else NO_MODEL_SHA,
+                              head_indices=(len(ARMS), len(ARMS) + 1) if args.head else None)
     try:
         sent = stream(sender, frame, rate_hz=args.rate, seconds=min(args.seconds, length),
                       epoch=args.epoch, enabled=not args.disabled)

@@ -44,7 +44,7 @@ FAKE_SDK_ENV = "K1_RPC_FAKE_SDK"
 #: The child refuses ``FAKE_SDK_ENV`` unless this is exactly "1".
 ALLOW_FAKE_ENV = "K1_RPC_ALLOW_FAKE_SDK"
 REQUESTS = frozenset({"GetMode", "UpperBodyCustomControl", "GetRobotInfo", "ChangeMode",
-                      "MoveCommand"})
+                      "MoveCommand", "RotateHead", "RotateHeadWithTime"})
 ROBOT_INFO_FIELDS = ("model", "name", "serial_number", "version")
 MONITOR_PERIOD_S = 0.005
 #: Attempts per request: the first, and one retry on a fresh child.
@@ -185,6 +185,11 @@ class RpcWorker:
             return RpcResult(request_id, name, False, error="no outcome within the deadline",
                              timeout=True)
         return result
+
+    @property
+    def ready(self) -> bool:
+        """A child has finished its SDK start (the head commander waits for it)."""
+        return self._ready
 
     def close(self) -> None:
         self._stop.set()
@@ -358,6 +363,10 @@ def execute(sdk: ModuleType, client: Any, name: str, args: tuple[Any, ...]) -> A
         _checked(name, client.ChangeMode(getattr(sdk.RobotMode, f"k{str(args[0]).title()}")))
     elif name == "MoveCommand":
         _checked(name, client.MoveCommand(*(float(value) for value in args)))
+    elif name == "RotateHead":  # (pitch, yaw): Booster's argument order
+        _checked(name, client.RotateHead(float(args[0]), float(args[1])))
+    elif name == "RotateHeadWithTime":  # (pitch, yaw, milliseconds)
+        _checked(name, client.RotateHeadWithTime(float(args[0]), float(args[1]), int(args[2])))
     else:
         raise ValueError(f"unknown loco request {name!r}")
     return None

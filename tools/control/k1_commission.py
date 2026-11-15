@@ -329,7 +329,8 @@ class VirtualClock:
 
 
 class PracticeTransport(FakeK1Transport):
-    """The fake robot: echoes arm commands as measured positions."""
+    """The fake robot: echoes arm commands as measured positions; its head follows the
+    head RPC backend (``head_rpc``, 40 ms lag, one jump stops at 0.2 rad)."""
 
     malformed_states = 0
 
