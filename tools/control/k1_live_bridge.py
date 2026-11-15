@@ -89,7 +89,9 @@ FROZEN_PACKETS = 3
 # Takeover and lag policy (3.2, 10.3)
 COARSE_GAP_RAD, COARSE_S = 0.4, 1.0
 ALIGN_SPEED_RAD_S, ALIGNED_RAD, REALIGNED_S = 0.2, 0.1, 0.5
-LAG_GAP_RAD, LAG_S, LAG_STOP_S = 0.5, 0.5, 6.0  # was 0.35/0.5/3.0: lag stops on a K1 (2026-11-15)
+#: Was 0.35 / 0.5 / 3.0, then 0.5 / 0.5 / 6.0: fast performers lag-stopped a real K1 (2026-11-15).
+LAG_GAP_RAD, LAG_S, LAG_STOP_S = 1.0, 1.0, 6.0
+REALIGN_SPEED_RAD_S = 1.0  # after a lag hold; 0.2 took > LAG_STOP_S for a 0.8 rad gap (047)
 #: A stream that stays stale (late, never lost) holds the arms; this long, it stops them.
 LATE_STOP_S = 3.0
 AT_REST_RAD_S = 0.05
@@ -333,7 +335,7 @@ def live_safety_config(config: K1BridgeConfig) -> SafetyConfig:
 def stop_settings(config: K1BridgeConfig) -> dict[str, Any]:
     return {"stale_timeout_s": STALE_S, "hard_timeout_s": round(stop_bound_s(config), 6),
             "tick_stall_timeout_s": STALL_S, "lag_gap_rad": LAG_GAP_RAD, "lag_s": LAG_S,
-            "lag_stop_s": LAG_STOP_S, "realign_speed_rad_s": ALIGN_SPEED_RAD_S,
+            "lag_stop_s": LAG_STOP_S, "realign_speed_rad_s": REALIGN_SPEED_RAD_S,
             "realigned_rad": ALIGNED_RAD, "realigned_s": REALIGNED_S,
             "stop_timeout_s": config.stop_timeout_s, "release_attempts": config.release_attempts}
 
@@ -539,7 +541,8 @@ class LiveRun:
                 # A K1 (1.8.1.2) ignores arm commands for about 1 s after the takeover: hold first.
                 command, aligned_since = dict(self.rest), None
             elif phase in ("aligning", "realign"):
-                command = ramp(last, target, ALIGN_SPEED_RAD_S * CONTROL_DT)
+                speed = ALIGN_SPEED_RAD_S if phase == "aligning" else REALIGN_SPEED_RAD_S
+                command = ramp(last, target, speed * CONTROL_DT)
                 aligned_since = (aligned_since or now) if worst < ALIGNED_RAD else None
                 needed = 0.0 if phase == "aligning" else REALIGNED_S
                 if aligned_since is not None and now - aligned_since >= needed:

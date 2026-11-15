@@ -70,6 +70,7 @@ FALL_READY = 0
 #: Pause between release retries. A K1 on firmware 1.8.1.2 refused the release 6 ms after the
 #: takeover; Booster's ArmController waits 0.5 s after enabling and retries the release 1 s apart.
 RELEASE_RETRY_S = 0.5
+TRACKING_LAG_S = 0.5  # owner 2026-11-15: a late arm is fine if it mimics; see tracking_errors
 LEG_START = 10
 #: How far a measured arm joint may sit past its range end at takeover.
 RANGE_TOLERANCE_RAD = 0.02
@@ -722,17 +723,25 @@ class K1ArmBridge:
     # -- frames -------------------------------------------------------------
 
     def tracking_errors(self, state: K1State) -> dict[str, float] | None:
-        """Per arm joint, |measured - the newest command published before the state
-        arrived|; ``None`` before the first command."""
-        reference = None
-        for published, positions in reversed(self._history):
-            if published <= state.receive_time_s:
-                reference = positions
-                break
-        if reference is None:
+        """Per arm joint, |measured - the closest command published in the
+        ``TRACKING_LAG_S`` before the state arrived|; ``None`` before the first command.
+
+        The K1 follows about 0.1 s late (2026-11-15), so a fast but faithful arm is not
+        counted as an error; a blocked arm leaves every recent command and still is.
+
+        Known limit: each joint takes its own closest command, so an arm blocked at a
+        position the commands pass again within every ``TRACKING_LAG_S`` (a fast
+        back-and-forth move) is not detected.  This is a divergence fault, not a
+        guaranteed blocked-arm stop."""
+        sent = [(published, positions) for published, positions in self._history
+                if published <= state.receive_time_s]
+        if not sent:
             return None
+        recent = [positions for published, positions in sent
+                  if published >= state.receive_time_s - TRACKING_LAG_S] or [sent[-1][1]]
         measured = state.arm_positions()
-        return {name: abs(measured[name] - reference[name]) for name in reference}
+        return {name: min(abs(measured[name] - positions[name]) for positions in recent)
+                for name in recent[0]}
 
     def _tracking_error(self, state: K1State) -> str | None:
         errors = self.tracking_errors(state)

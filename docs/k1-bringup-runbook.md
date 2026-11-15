@@ -50,7 +50,7 @@ applies to it.
 | takeover / release | this PC takes the arms from Booster's controller (`UpperBodyCustomControl(true)`) and gives them back (`false`); Booster keeps the head and legs |
 | kp / kd | how stiffly the arm motors hold their commanded angle (kp) and how much they resist speed (kd) |
 | safety envelope | the layer in this software that limits every arm command's speed, acceleration and range |
-| tracking error | the difference between the commanded and the measured joint angle |
+| tracking error | the difference between the measured joint angle and the closest angle commanded in the last 0.5 s (the K1's arms follow about 0.1 s late; since 2026-11-15 a late but faithful arm is not an error) |
 | p95 | 95 % of the samples are below this value |
 | DDS | the network protocol the Booster SDK uses (UDP, including multicast) |
 | session / attempt | a session is one robot's folder of evidence; each run of a step is one attempt in it |
@@ -625,8 +625,8 @@ bash tools/xsens/live_operator.sh gmr --robot booster_k1 --robot-stream udp://12
   for 1 s. They first align at 0.2 rad/s or less, then follow.
 - **Stops.** STOP (Ctrl-C) or the time limit (default 120 s, max 600 s): the arms slow down, then go
   back to Booster. A new Calibrate, a restarted live tool or Tracking off also stops: start again.
-  A performer more than 0.35 rad ahead for 0.5 s makes the arms hold, then re-align; after 3 s of
-  that they stop. Stream loss: hold at 0.1 s, release at 0.1 s + braking time + 0.1 s (the bridge
+  A performer more than 1.0 rad ahead for 1.0 s makes the arms hold, then re-align at up to
+  1.0 rad/s; after 6 s of that they stop. Stream loss: hold at 0.1 s, release at 0.1 s + braking time + 0.1 s (the bridge
   refuses speed and acceleration caps that make this longer than 1.5 s).
 - **Hoist.** Until you answer yes to the strap-clearance question, shoulder pitch and roll stay
   within 0.6 rad of rest.

@@ -443,11 +443,11 @@ def settle_targets(pose: Mapping[str, float]) -> dict[str, float]:
 def room(settled: Mapping[str, float], name: str, excursion: float) -> int:
     """+1 or -1: the direction an ``excursion`` fits inside the margin, 0 if neither."""
     limit = LIMITS[name]
-    if settled[name] + excursion <= limit.upper - MARGIN + 1e-9:
-        return 1
-    if settled[name] - excursion >= limit.lower + MARGIN - 1e-9:
-        return -1
-    return 0
+    up = settled[name] + excursion <= limit.upper - MARGIN + 1e-9
+    down = settled[name] - excursion >= limit.lower + MARGIN - 1e-9
+    if up and down:  # both fit: move away from the nearer limit (K1 arms hang near a roll limit)
+        return 1 if settled[name] <= (limit.lower + limit.upper) / 2 else -1
+    return 1 if up else -1 if down else 0
 
 
 def ticks(seconds: float) -> int:
