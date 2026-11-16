@@ -93,6 +93,8 @@ from tools.control.k1_arm_bridge import (  # noqa: E402
 LIMITS = commission.LIMITS
 CONTROL_DT = 0.02  # 50 Hz, the tested rate (100 Hz only after S2)
 DEFAULT_PORT = 47011
+#: Where the live tool writes its suit captures (mocap_g1/suit_recorder.py; option --suit-root).
+SUIT_ROOT = REPO_ROOT / "artifacts" / "xsens-live" / "suit"
 
 # Stream rules (3.2, 10.2)
 STALE_S = 0.10               # t_s: hold when the newest fresh suit frame is older
@@ -1172,6 +1174,27 @@ def go_summary(meta: Mapping[str, Any], args: argparse.Namespace, plan: Plan,
     return "\n".join(lines)
 
 
+def find_capture(root: Path, session_id: int | None) -> tuple[dict[str, Any] | str, str | None]:
+    """The suit capture whose ``capture.json`` names the stream session ``session_id`` (plan B2):
+    ``({"folder", "capture_id"}, None)``, or ``("not found" | "ambiguous", warning)``. Never
+    refuses and never picks one of several."""
+    found = []
+    for meta_path in sorted(Path(root).glob("*/capture.json")):
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if session_id is not None and meta.get("session_id") == session_id:
+            found.append(meta_path.parent)
+    if len(found) == 1:
+        return {"folder": str(found[0].resolve()), "capture_id": found[0].name}, None
+    if not found:
+        return "not found", (f"suit recording not found: no capture in {root} for stream session "
+                             f"{session_id}; this run's suit data will be missing")
+    return "ambiguous", (f"suit recording ambiguous: {len(found)} captures in {root} for stream "
+                         f"session {session_id} ({', '.join(p.name for p in found)})")
+
+
 def owner_go(args: argparse.Namespace, summary: str, warnings: list[str], session: Any,
              settings: Mapping[str, Any]) -> dict[str, Any]:
     """The owner's Go for exactly this summary, session and settings (no Go: refused)."""
@@ -1221,6 +1244,11 @@ def attempt(session: Any, rig: Any, receiver: StreamReceiver, args: argparse.Nam
                                          "check again")
     print("Auto-check 2 (stream): PASS", flush=True)
     head = ("off" if args.no_head else "on") if head_available() else "off (no head code in this build)"
+    packet = receiver.view(rig.clock()).packet  # the stream the checks just passed
+    suit, suit_warning = find_capture(args.suit_root or SUIT_ROOT,
+                                      None if packet is None else packet.session_id)
+    if suit_warning is not None:
+        warnings = [*warnings, suit_warning]
     go = owner_go(args, go_summary(meta, args, plan, list(warnings), head), list(warnings),
                   session, settings)
     run_settings = {"stage": args.stage, "drill": args.drill, "time_limit_s": args.time_limit,
@@ -1231,6 +1259,10 @@ def attempt(session: Any, rig: Any, receiver: StreamReceiver, args: argparse.Nam
     started = session.start(plan.key, run_settings, {})
     started.data["gate_settings"] = settings
     started.data["owner_go"] = go
+    if isinstance(suit, dict):
+        suit.update(go_monotonic=time.monotonic(), release_monotonic="unknown")
+    started.data["suit_recording"] = suit
+    commission.atomic_write(started.path, started.data)  # an interrupted attempt keeps Go and the capture
     if plan.drill:
         started.data["expected_fault"] = {"drill": plan.drill, "fault": EXPECTED_FAULT[plan.drill]}
     rig.instrument()
@@ -1250,10 +1282,12 @@ def attempt(session: Any, rig: Any, receiver: StreamReceiver, args: argparse.Nam
                 why = "operator stop before the takeover"
             gate.defer()
             if why is not None:
+                ended(suit)
                 started.finish("FAIL", reason=why, release_confirmed=True, gate_settings=settings,
                                tick_log=str(log_path))
                 return commission.report_end(session, started, "FAIL", why, next_step=None)
             follow(run, gate, rig)
+            ended(suit)
     rpc = [call["seconds"] for call in rig.rpc if not call["enable"] and call["ok"]]
     released = run.bridge.state in ("released", "fault_latched", "idle")
     if plan.drill and released:
@@ -1268,7 +1302,14 @@ def attempt(session: Any, rig: Any, receiver: StreamReceiver, args: argparse.Nam
     if revoke is not None:
         revoke_gate(meta, f"live-arms@{args.stage}", revoke, started.path)
     print(f"Stream: {json.dumps(summary['stream'])}; following {summary['following_s']} s")
+    print("Suit recording: " + (suit["folder"] if isinstance(suit, dict) else suit))
     return commission.report_end(session, started, outcome, reason, next_step=None)
+
+
+def ended(suit: dict[str, Any] | str) -> None:
+    """The release time (this PC's monotonic clock, as the suit capture) for the export."""
+    if isinstance(suit, dict):
+        suit["release_monotonic"] = time.monotonic()
 
 
 def release_state(rig: Any) -> str:
@@ -1396,6 +1437,8 @@ def build_parser() -> argparse.ArgumentParser:
                         help="judge the session against the stage PASS and write the ledger entry")
     parser.add_argument("--operator", help="who gives the Go; with --evaluate: who signs the ledger")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT, help="loopback UDP port")
+    parser.add_argument("--suit-root", type=Path,
+                        help="the live tool's suit captures (default: artifacts/xsens-live/suit)")
     parser.add_argument("--time-limit", type=float, default=TIME_LIMIT_S,
                         help=f"seconds of following (max {MAX_TIME_LIMIT_S:g})")
     parser.add_argument("--acceptance-record", type=Path, help="booster: the S0 acceptance record")

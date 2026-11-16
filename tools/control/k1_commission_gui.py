@@ -25,6 +25,7 @@ import datetime as dt
 import ipaddress
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import signal
@@ -52,6 +53,7 @@ from mocap_g1.stage_gate import STAGES, Ledger, StageGateError, commissioning_ro
 
 CHILD = Path(__file__).with_name("k1_gui_child.py")
 SENDER = Path(__file__).with_name("k1_live_synth.py")
+FLIGHT = Path(__file__).with_name("k1_flight_recorder.py")
 ROOT = commissioning_root()
 #: Step 13's "Run" choices and the bridge's --drill value of each.
 LIVE_DRILLS = {"Following": None, "Stream-loss drill": "stream-loss", "STOP drill": "stop"}
@@ -325,8 +327,69 @@ class PracticeSender:
             self.process.wait()
 
 
+@dataclass
+class RobotDataRecorder:
+    """tools/control/k1_flight_recorder.py (read-only, about 500 Hz) into the session folder
+    while a real-robot live run goes (plan B3). A companion of the step: stopped with SIGTERM,
+    and waited for, before the result is shown; SIGINT when the window dies."""
+
+    out: Path
+    net: str
+    domain: str
+    process: subprocess.Popen[bytes] | None = None
+    error: str = ""
+    reported: bool = False
+
+    @property
+    def log_path(self) -> Path:
+        return self.out / "recorder.log"
+
+    def start(self) -> None:
+        try:
+            self.out.mkdir(parents=True, exist_ok=True)
+            with self.log_path.open("w", encoding="utf-8") as log:
+                self.process = subprocess.Popen(
+                    [sys.executable, "-u", str(FLIGHT), str(self.out), self.net, self.domain],
+                    stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT, cwd=REPO_ROOT,
+                    preexec_fn=_die_with_window)
+        except OSError as exc:
+            self.error = str(exc)
+
+    @property
+    def running(self) -> bool:
+        return self.process is not None and self.process.poll() is None
+
+    def stop(self, timeout: float = 15.0) -> None:
+        if not self.running or self.process is None:
+            return
+        self.process.terminate()  # SIGTERM: it writes the last file, then exits
+        try:
+            self.process.wait(timeout)
+        except subprocess.TimeoutExpired:
+            self.process.kill()
+            self.process.wait()
+
+    def status(self) -> str:
+        """One line: running, the samples written, or the failure."""
+        try:
+            text = self.log_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            text = ""
+        samples = sum(int(n) for n in re.findall(r": (\d+) samples$", text, re.MULTILINE))
+        if self.running:
+            return f"Robot data (500 Hz): recording into {self.out} ({samples} samples written)"
+        code = None if self.process is None else self.process.returncode
+        if code == 0:
+            return f"Robot data (500 Hz): {samples} samples in {self.out}"
+        last = self.error or next((line for line in reversed(text.splitlines()) if line.strip()),
+                                  "no output")
+        return (f"Robot data (500 Hz) FAILED (exit {code}): {last}. The robot run is not "
+                f"affected; send {self.log_path} to the developers.")
+
+
 def _die_with_window() -> None:
-    """In the sender child before exec: SIGINT when the window dies (like k1_gui_child)."""
+    """In the sender and robot data children before exec: SIGINT when the window dies (like
+    k1_gui_child)."""
     import ctypes
 
     ctypes.CDLL(None).prctl(1, int(signal.SIGINT), 0, 0, 0)  # PR_SET_PDEATHSIG
@@ -932,10 +995,38 @@ def zip_session(path: Path) -> Path:
             for file in sorted(path.rglob("*")):
                 if file.is_file():
                     archive.write(file, Path(path.name) / file.relative_to(path))
+            for attempt_id, files in suit_exports(path):
+                for name, data in files.items():
+                    archive.writestr(str(Path(path.name) / "suit" / attempt_id / name), data)
         os.replace(partial, target)
     finally:
         partial.unlink(missing_ok=True)
     return target
+
+
+def suit_exports(session: Path) -> list[tuple[str, dict[str, bytes]]]:
+    """Per attempt with a suit capture: its chunks around Go and the release, and
+    ``suit-recording.json`` (plan B2.4). A missing capture folder is reported, not raised."""
+    from mocap_g1 import suit_recorder
+
+    exports = []
+    for file in sorted((session / "attempts").glob("[0-9][0-9][0-9]*.json")):
+        try:
+            data = json.loads(file.read_text(encoding="utf-8"))
+            suit = data["suit_recording"]
+            folder, go = Path(suit["folder"]), float(suit["go_monotonic"])
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+        release = suit.get("release_monotonic")
+        release = float(release) if isinstance(release, (int, float)) else None
+        if not folder.is_dir():
+            report = {"complete": False, "why": f"the capture folder {folder} is gone"}
+            exports.append((file.stem, {"suit-recording.json": json.dumps(report, indent=2).encode()}))
+            continue
+        files, report = suit_recorder.export(folder, go, release)
+        files["suit-recording.json"] = json.dumps(report, indent=2, sort_keys=True).encode()
+        exports.append((file.stem, files))
+    return exports
 
 
 def newest_preview(root: Path | None = None) -> Path | None:
@@ -1976,6 +2067,10 @@ def run_gui() -> int:  # pragma: no cover - exercised by hand and by the smoke t
         result_label.configure(text=f"{TITLES.get(key, key)}: {outcome.verdict}"
                                + (f" (attempt {runner.attempt['id']})" if runner.attempt else ""),
                                fg=colour)
+        for flight in runner.companions:  # stopped (and its last file written) in poll()
+            if isinstance(flight, RobotDataRecorder):
+                write("=== " + flight.status(), "gui" if flight.process is not None
+                      and flight.process.returncode == 0 else "fail")
         write(f"=== {TITLES.get(key, key)} finished: {outcome.verdict} "
               f"(exit {runner.process.returncode if runner.process else '?'}); "
               f"log {runner.log_path}", "gui")
@@ -1992,6 +2087,34 @@ def run_gui() -> int:  # pragma: no cover - exercised by hand and by the smoke t
             write(outcome.alarm, "fail")
         show_prompt(runner)
         refresh()
+
+    def robot_data(runner: StepRunner) -> None:
+        """Real robot only: the 500 Hz recorder starts once the run's session is known (step
+        13) or both quick start checks passed (before Go); a failure is said once."""
+        flights = [c for c in runner.companions if isinstance(c, RobotDataRecorder)]
+        for flight in flights:
+            if not flight.running and not flight.reported and runner.running:
+                flight.reported = True
+                write("=== " + flight.status(), "fail")
+        if flights or runner.session is None or not runner.running:
+            return
+        if runner.step == "quick":
+            if v["transport"].get() != "booster" or (quick_go_prompt() is None
+                                                     and runner.attempt is None):
+                return
+            net, domain = net_value(v["net"].get()), v["domain"].get().strip() or "0"
+        elif runner.step == "live":
+            meta = state["meta"] or {}
+            if meta.get("transport") != "booster":
+                return
+            net, domain = str(meta.get("net", "")), str(meta.get("domain_id", 0))
+        else:
+            return
+        flight = RobotDataRecorder(runner.session / "robot-data" /
+                                   f"{dt.datetime.now():%Y%m%d-%H%M%S}", net, domain)
+        flight.start()
+        runner.companions.append(flight)
+        write("=== " + flight.status(), "gui" if flight.process is not None else "fail")
 
     def tick() -> None:
         while not results.empty():
@@ -2027,6 +2150,7 @@ def run_gui() -> int:  # pragma: no cover - exercised by hand and by the smoke t
                     write(("[mirror] " + item) if slot == "mirror" else item,
                           "mirror" if slot == "mirror" else "")
             if slot == "step":
+                robot_data(runner)
                 show_prompt(runner)
                 if runner.step == "quick" and quick_go_prompt() is not None and \
                         str(go_button["state"]) == "disabled":

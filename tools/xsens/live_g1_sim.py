@@ -15,6 +15,7 @@ import json
 import math
 import os
 from pathlib import Path
+import secrets
 import select
 import signal
 import sys
@@ -70,6 +71,7 @@ from mocap_g1.schema import (
     G1_ARM_SDK_JOINTS,
     load_official_joint_limits,
 )
+from mocap_g1.suit_recorder import SuitRecorder
 from mocap_g1.xsens_live import GmrFrameConverter, LatestBodyReceiver
 
 
@@ -604,6 +606,39 @@ def wait_for_first_frame(
     return StartupFrame(first_body, first_frame, source, first_source_timestamp)
 
 
+#: Calibrate warns when either thigh is further than this from the vertical (plan B4).
+STANDING_THIGH_MAX_DEG = 35.0
+
+
+def standing_warning(frame: Any) -> str | None:
+    """The calibration pose check (advisory): ``None`` when both upper legs are within
+    35 deg of the world vertical, else the warning. The segment z axis is the thigh's long
+    axis (checked on the 2026-11-15 standing capture: 1.6 to 5.3 deg on every frame)."""
+    worst = 0.0
+    for name in ("Left_UpperLeg", "Right_UpperLeg"):
+        try:
+            w, x, y, z = (float(value) for value in frame[name][1])
+        except (KeyError, IndexError, TypeError, ValueError):
+            return "pose check unavailable (no thigh data)"
+        norm = w * w + x * x + y * y + z * z
+        if not (math.isfinite(norm) and norm > 1e-12):
+            return "pose check unavailable (no thigh data)"
+        # acos(|z_thigh . z_world|): the world-z part of the segment z axis is 1 - 2(x^2 + y^2).
+        worst = max(worst, math.degrees(math.acos(min(1.0, abs(1.0 - 2.0 * (x * x + y * y) / norm)))))
+    if worst > STANDING_THIGH_MAX_DEG:
+        return (f"the performer is not standing (thigh {worst:.0f}\u00b0 from vertical). Stand up, "
+                "arms down, look straight ahead, then Calibrate again.")
+    return None
+
+
+def calibration_event(request: int | None, *, ok: bool, epoch: int, epoch_changed: bool,
+                      warning: str | None, reason: str | None, **extra: Any) -> str:
+    """The ``STATUS`` line answering one calibration request (plan "Calibration result event")."""
+    return "STATUS " + json.dumps({"calibration_result": {
+        "request": request, "ok": ok, "epoch": epoch, "epoch_changed": epoch_changed,
+        "warning": warning, "reason": reason, **extra}})
+
+
 #: stdin control words, mapped to :class:`LiveOperatorControls` methods.
 CONTROL_COMMANDS = {
     "calibrate": "request_calibration",
@@ -672,6 +707,10 @@ class StdinControl:
         self.read = read
         self.partial = b""
         self.open = True
+        #: ``calibrate`` words received so far (1, 2, ...): the result event's ``request``.
+        self.calibrate_words = 0
+        #: Their numbers, waiting for the calibration that answers them.
+        self.pending_calibrations: list[int] = []
 
     def poll(self) -> None:
         if not self.open:
@@ -689,7 +728,15 @@ class StdinControl:
             return
         *lines, self.partial = (self.partial + data).split(b"\n")
         for line in lines:
-            apply_control_word(line.decode("utf-8", errors="replace"), self.controls)
+            word = line.decode("utf-8", errors="replace")
+            if word.strip() == "calibrate":
+                self.calibrate_words += 1
+                self.pending_calibrations.append(self.calibrate_words)
+            apply_control_word(word, self.controls)
+
+    def take_calibrations(self) -> list[int]:
+        taken, self.pending_calibrations = self.pending_calibrations, []
+        return taken
 
 
 class LiveLoop:
@@ -752,6 +799,8 @@ class LiveLoop:
         self.calibrated = False
         #: ``--robot-stream``: sends each accepted reference to the K1 live bridge.
         self.robot_stream: LivePacketSender | None = None
+        #: ``--robot-stream``: the always-on suit recorder; its state is in ``STATUS``.
+        self.suit_recorder: SuitRecorder | None = None
         #: Counts neutral calibrations that changed the reference (0 = never calibrated).
         self.calibration_epoch = 0
         self.previous_status_key: tuple[bool, str, bool] | None = None
@@ -842,12 +891,13 @@ class LiveLoop:
             "drops": self.stats.estimated_drops,
             "failures": self.stats.failures,
             "calibrated": self.calibrated,
+            "suit_recording": None if self.suit_recorder is None else self.suit_recorder.state,
         }
 
     def print_status(self, reason: str, *, now: float, periodic: bool) -> None:
         """``STATUS {json}`` with each stats line and whenever the key fields change."""
         record = self.status(reason, now=now)
-        key = (record["enabled"], record["reason"], record["calibrated"])
+        key = (record["enabled"], record["reason"], record["calibrated"], record["suit_recording"])
         if periodic or key != self.previous_status_key:
             self.previous_status_key = key
             print("STATUS " + json.dumps(record, allow_nan=False), flush=True)
@@ -884,11 +934,34 @@ class LiveLoop:
             self.pending_timeline = None
             self._report_failure(f"Rejected frame: {exc}")
 
-    def calibrate_arms(self) -> None:
-        """Neutral-pose calibration from the pending frame (operator pressed N)."""
+    def calibrate_arms(self, requests: list[int | None] | None = None) -> None:
+        """Neutral-pose calibration from the pending frame, then one ``calibration_result``
+        per request it serves (stdin numbers; ``None`` for N or ``--calibrate-after``)."""
+        warning = standing_warning(self.pending_frame)  # first: GMR may change the frame in place
+        if warning is not None:
+            print(f"CALIBRATION WARNING: {warning}", file=sys.stderr, flush=True)
+        before = self.calibration_epoch
+        reason = self._calibrate()
+        if self.emit_status:
+            for index, request in enumerate(requests or [None]):
+                extra = {"shared": True} if index else {}  # the same calibration as the first
+                print(calibration_event(request, ok=reason is None, epoch=self.calibration_epoch,
+                                        epoch_changed=self.calibration_epoch != before,
+                                        warning=warning, reason=reason, **extra), flush=True)
+
+    def interrupt_calibrations(self) -> None:
+        """The run is ending: stdin requests still waiting will never run."""
+        if self.emit_status and self.control is not None:
+            for request in self.control.take_calibrations():
+                print(calibration_event(request, ok=False, epoch=self.calibration_epoch,
+                                        epoch_changed=False, warning=None,
+                                        reason="interrupted: the live run ended"), flush=True)
+
+    def _calibrate(self) -> str | None:
+        """None on success, else why it failed (the epoch tells what changed)."""
         if self.arm_alignment is None:
             print("ARM ALIGNMENT unavailable for this retargeter", file=sys.stderr)
-            return
+            return "this robot has no neutral calibration"
         # calibrate() either raises with the old offsets restored, or applies new ones; arms_done
         # also counts a new head neutral, so a later floor failure still bumps the epoch.
         arms_done = False
@@ -919,9 +992,9 @@ class LiveLoop:
                 self.calibration_epoch += 1
                 print(f"FLOOR CALIBRATION failed: {exc}; arms calibrated, floor unchanged",
                       file=sys.stderr)
-                return
+                return f"floor calibration failed: {str(exc)[:120]}; arms calibrated, floor unchanged"
             print(f"ARM ALIGNMENT failed: {exc}; arms and floor unchanged", file=sys.stderr)
-            return
+            return f"calibration failed: {str(exc)[:120]}; arms and floor unchanged"
         self.calibration_epoch += 1
         arms = (
             f"arm orientation from the current pose ({len(offsets)} arm segments)"
@@ -929,6 +1002,7 @@ class LiveLoop:
         )
         self.calibrated = True
         print(f"NEUTRAL CALIBRATION: {arms}{floor}. Press N again in a neutral pose to redo it.")
+        return None
 
     def process_pending(self) -> None:
         calibrate = self.controls.take_calibration_request()
@@ -939,7 +1013,8 @@ class LiveLoop:
             self.calibrate_after_s = None
             calibrate = True
         if calibrate:
-            self.calibrate_arms()
+            self.calibrate_arms(self.control.take_calibrations() if self.control is not None
+                                else None)
         timeline = self.pending_timeline
         head = self.head
         try:
@@ -1171,8 +1246,17 @@ def main(argv: list[str] | None = None) -> int:
         expected_source=args.source_ip,
         strict=True,
     )
+    # Every --robot-stream run records the raw suit datagrams (plan B1).
+    suit_recorder = stream_session = None
+    if stream_address is not None:
+        stream_session = secrets.randbits(63) or 1
+        suit_recorder = SuitRecorder(Path(args.video_path).expanduser().parent / "suit",
+                                     session_id=stream_session)
+        if suit_recorder.start():
+            receiver.tap = suit_recorder.tap
     converter = GmrFrameConverter()
     viewer = None
+    loop: LiveLoop | None = None
     robot_stream: LivePacketSender | None = None
     source_label = args.source_ip or "any source"
     print(f"Waiting for strict MXTP02 on {args.bind}:{args.port} from {source_label}...")
@@ -1214,6 +1298,7 @@ def main(argv: list[str] | None = None) -> int:
                 return 2
             robot_stream = LivePacketSender(
                 stream_address, model_sha256=sha256_file(Path(xml)), clock=time.monotonic,
+                session_id=stream_session,
                 arm_indices=[robot.dof_joints.index(name) for name in K1_UPPER_BODY_JOINTS],
                 head_indices=[robot.dof_joints.index(name) for name in HEAD_JOINTS])
         viewer = RobotMotionViewer(
@@ -1250,6 +1335,7 @@ def main(argv: list[str] | None = None) -> int:
             control=StdinControl(controls) if args.control_stdin else None,
         )
         loop.robot_stream = robot_stream
+        loop.suit_recorder = suit_recorder
         if robot.key == "booster_k1":  # K6: simulation first, with or without --robot-stream
             loop.head = HeadReference([robot.dof_joints.index(name) for name in HEAD_JOINTS])
         loop.start()
@@ -1306,9 +1392,16 @@ def main(argv: list[str] | None = None) -> int:
         _print_receiver_diagnostics(receiver)
         return 3
     finally:
+        if loop is not None:
+            loop.interrupt_calibrations()
         if viewer is not None:
             viewer.close()
         receiver.close()
+        if suit_recorder is not None:
+            suit_recorder.close()
+            print(f"Suit recording: {suit_recorder.written} datagrams written, "
+                  f"{suit_recorder.dropped} lost, in {suit_recorder.folder} (last state: "
+                  f"{suit_recorder.state})")
         if robot_stream is not None:
             robot_stream.close()
         for line in pipeline.report_lines():

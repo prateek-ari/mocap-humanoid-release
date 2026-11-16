@@ -6,7 +6,7 @@ from dataclasses import dataclass, replace
 import math
 import socket
 import time
-from typing import Iterable
+from typing import Callable, Iterable
 
 import numpy as np
 
@@ -193,6 +193,9 @@ class LatestBodyReceiver:
         self.last_batch_result: PacketBatchResult | None = None
         self.last_overload_error: ReceiverOverloadError | None = None
         self.unexpected_sources: set[str] = set()
+        #: Called with every received ``(data, source)`` right after ``recvfrom`` (the suit
+        #: recorder, mocap_g1/suit_recorder.py); it must not block.
+        self.tap: Callable[[bytes, tuple[str, int]], None] | None = None
 
     def receive_latest(self, *, timeout: float) -> tuple[BodyDatagram, tuple[str, int]]:
         """Return one fresh body frame or fail closed on a provable backlog.
@@ -207,7 +210,7 @@ class LatestBodyReceiver:
                 raise TimeoutError("no valid MXTP02 body frame received")
             self.socket.settimeout(remaining)
             try:
-                packets = [self.socket.recvfrom(65535)]
+                packets = [self._recv()]
             except socket.timeout as exc:
                 raise TimeoutError("no valid MXTP02 body frame received") from exc
 
@@ -216,7 +219,7 @@ class LatestBodyReceiver:
             try:
                 while len(packets) < self.max_drain_packets:
                     try:
-                        packets.append(self.socket.recvfrom(65535))
+                        packets.append(self._recv())
                     except BlockingIOError:
                         break
                 if len(packets) == self.max_drain_packets:
@@ -228,7 +231,7 @@ class LatestBodyReceiver:
                     # take over.  Remaining queue depth is deliberately not
                     # drained here: sustained traffic must not starve the caller.
                     try:
-                        packets.append(self.socket.recvfrom(65535))
+                        packets.append(self._recv())
                     except BlockingIOError:
                         pass
                     else:
@@ -283,6 +286,12 @@ class LatestBodyReceiver:
                     self.stream_restarts += 1
                     return result.body, result.source
                 self.total_reordered_body_packets += 1
+
+    def _recv(self) -> tuple[bytes, tuple[str, int]]:
+        data, source = self.socket.recvfrom(65535)
+        if self.tap is not None:
+            self.tap(data, source)
+        return data, source
 
     def _confirm_restart(self, counter: int) -> bool:
         """Track a candidate restarted stream; True once it has persisted."""

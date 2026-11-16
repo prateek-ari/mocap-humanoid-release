@@ -811,3 +811,67 @@ the K1 head has no roll.
   same way each time (performer looks left: the robot looks to its left; performer looks down: the
   robot looks down). If a direction is wrong, press STOP and run again with `--no-head` (or
   untick **Head follows**).
+
+## Recordings of a run
+
+Every live run from the K1 window leaves these recordings. Nobody has to start a recorder by hand.
+
+| What | Where | Made by | When |
+| --- | --- | --- | --- |
+| **Suit data**: every UDP datagram the live tool receives, raw, with its receive time and sender | `artifacts/xsens-live/suit/<capture id>/` in the checkout (`/data/suit/` inside Docker) | the live tool, whenever it streams to the K1 (`--robot-stream`) | from the live tool's start to its end |
+| **Robot data**: every joint state (about 500 Hz: position, speed, torque estimate, temperature, IMU); read-only | `<session>/robot-data/<time>/lowstate-*.npz` | the K1 window (`tools/control/k1_flight_recorder.py`) | real robot only: Quick start (from the moment both checks pass) and step 13 |
+| **Bridge data**: commands and measured joints per tick, the attempt file | `<session>/attempts/` | the K1 live bridge | every attempt |
+
+**How a run finds its suit data.** At Go the bridge looks in `artifacts/xsens-live/suit/` (option
+`--suit-root`) for the capture whose `capture.json` has the stream's session id, and writes the
+folder, the capture id and the Go time into the attempt file (`suit_recording`). At the end it adds
+the release time. `not found` or `ambiguous` is a warning on the Go screen and in the attempt file;
+it never stops the run. An attempt that was cut off (the bridge was killed) keeps its Go time and
+`release_monotonic: "unknown"`.
+
+**Zip session for the developers** adds `suit/<attempt>/` to the zip: the whole 10 s chunk files
+from Go − 60 s to the release + 5 s (to the capture's end when the release is unknown),
+`capture.json`, and `suit-recording.json`:
+
+- `complete: true`: every datagram from Go − 60 s (or from the capture's first one) to release + 5 s
+  is in the zip, with no gap in the sequence numbers.
+- `complete: false`: `gaps`, `missing_chunks` or `unreadable` say what is missing.
+- `complete: "unknown"`: the release time is unknown, or no datagram after release + 5 s arrived
+  within 10 s.
+- `missing_pre_roll_s`: the capture started later than Go − 60 s (not an error).
+
+**Messages of the live tool, and what to do.**
+
+| Message | Meaning | What to do |
+| --- | --- | --- |
+| `SUIT RECORDING to <folder>` | it records | nothing |
+| `SUIT RECORDING INCOMPLETE: the disk does not keep up` | the disk is too slow; datagrams are lost from the recording (the robot run is not affected) | close other programs that write to the disk; tell the developers |
+| `SUIT RECORDING recovered: ...` | it records again; the gap stays in the recording | nothing |
+| `SUIT RECORDING OFF: only N GB free in <folder>. Delete old capture folders there.` | less than 10 GB free at the start, or less than 2 GB while it recorded | zip the sessions you still need, then delete old capture folders in that folder |
+| `SUIT RECORDING INCOMPLETE: cannot write ...` | a disk error; it stopped recording | check the disk; tell the developers |
+
+**Disk.** About 30 MB per minute (1.8 GB per hour). Nothing is ever deleted automatically: delete
+old capture folders in `artifacts/xsens-live/suit/` yourself, after the sessions that use them are
+zipped.
+
+**Limits.** A crash of the live tool can lose up to 4096 datagrams that were waiting for the disk,
+plus the one being written. A power loss or an operating-system crash can also lose what the
+operating system had not written yet, and the last chunk can end in a part of a datagram (the
+reader skips it). A gap in the sequence numbers proves a loss only when a later datagram survived;
+a lost end cannot be seen. The 3 s age limit only triggers the warning.
+
+**Not covered.** A bridge started from a terminal does not start the robot data recorder: start
+`tools/control/k1_flight_recorder.py <folder> <PC interface> <DDS domain>` yourself. The practice
+robot has no robot data.
+
+**Play suit data back** (for example into the live tool on another PC):
+`python tools/xsens/play_suit_recording.py artifacts/xsens-live/suit/<capture id> --to 127.0.0.1:5555`.
+The datagrams then come from this PC: start the live tool with `--source-ip 127.0.0.1`.
+
+**Calibrate pose check.** When either thigh is more than 35° from vertical at Calibrate, the live
+tool says `the performer is not standing (thigh N° from vertical). Stand up, arms down, look
+straight ahead, then Calibrate again.` It is a warning: the calibration is still applied.
+`pose check unavailable` means the suit sent no thigh data. With `--control-stdin`
+(the Setup console) the live tool answers each request with one
+`STATUS {"calibration_result": {...}}` line, and the recording state is the `suit_recording`
+field of its `STATUS` lines.
