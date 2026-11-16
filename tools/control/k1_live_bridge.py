@@ -17,9 +17,10 @@ summary; without a record the run uses attempt 049's settings (kp 40, kd 2, 2 ra
     python3 tools/control/k1_live_bridge.py --session DIR --stage hoist --drill stop
     python3 tools/control/k1_live_bridge.py --session DIR --stage hoist --evaluate --operator NAME
 
-One run = one attempt = one takeover/release cycle: wait for the coarse gate
-(stream fresh, calibrated, tracking on, worst arm gap < 0.4 rad for 1 s), take
-over, align at <= 0.2 rad/s until every gap < 0.1 rad, then follow.  A new
+One run = one attempt = one takeover/release cycle: wait for the start gate
+(stream fresh, calibrated, tracking on for 1 s), take over, move the robot's arms
+to the performer's arm pose at <= 0.2 rad/s (from any gap; the envelope and the
+contact check apply) until every gap < 0.1 rad, then follow.  A new
 session id, a new calibration epoch or tracking off stops the arms (decelerate,
 release): start again.  Lag policy: a gap > 1.0 rad for 1.0 s holds (bounded
 deceleration), then re-aligns at up to 1.0 rad/s; a hold longer than 6 s stops.  Stream loss holds
@@ -103,7 +104,9 @@ RANGE_SLACK_RAD = 0.05       # further outside the K1 range: dropped; inside it:
 DROP_FAULT_PER_S = 20
 FROZEN_PACKETS = 3
 # Takeover and lag policy (3.2, 10.3)
-COARSE_GAP_RAD, COARSE_S = 0.4, 1.0
+#: The start gate (fresh, calibrated, tracking on) must hold this long.  There is no arm-gap
+#: limit since 2026-11-16 (owner): the alignment moves the robot's arms to the performer's.
+COARSE_S = 1.0
 ALIGN_SPEED_RAD_S, ALIGNED_RAD, REALIGNED_S = 0.2, 0.1, 0.5
 #: Was 0.35 / 0.5 / 3.0, then 0.5 / 0.5 / 6.0: fast performers lag-stopped a real K1 (2026-11-15).
 LAG_GAP_RAD, LAG_S, LAG_STOP_S = 1.0, 1.0, 6.0
@@ -146,7 +149,8 @@ Before the robot moves:
     console's Calibrate and Tracking on are done;
   - nothing and nobody within reach of the arms; the performer can see the robot;
   - the robot is in walking mode (set with the remote).
-The arms take over only when the performer's arms match the robot's (gap < 0.4 rad for 1 s).
+After Go the robot's arms move slowly (0.2 rad/s) to the performer's arm pose, then follow:
+the performer holds still until the status says following.
 STOP: Ctrl-C here (or the window's STOP): the arms slow down, then go back to Booster."""
 SUPPORT = {
     "hoist": "the robot stands with its feet loaded and the hoist strap slack but attached",
@@ -491,7 +495,8 @@ class LiveRun:
         return targets
 
     def gate_problem(self, now: float) -> tuple[str | None, float]:
-        """Why the coarse gate is closed now (``None`` = open), and the worst gap."""
+        """Why the start gate is closed now (``None`` = open), and the worst arm gap (shown
+        only: the alignment after the takeover closes any gap)."""
         self.last_gaps = {}
         view = self.receiver.view(now)
         packet = view.packet
@@ -512,10 +517,10 @@ class LiveRun:
         targets = self.targets(packet, rest=measured)  # before the takeover the rest is now
         self.last_gaps = {name: abs(targets[name] - measured[name]) for name in ARMS}
         gap = max(self.last_gaps.values())
-        return (None if gap < COARSE_GAP_RAD else f"arm gap {gap:.2f} rad"), gap
+        return None, gap
 
     def wait_for_gate(self) -> str | None:
-        """Block until the coarse gate held for ``COARSE_S``; ``None`` or why it never did."""
+        """Block until the start gate held for ``COARSE_S``; ``None`` or why it never did."""
         start = self.rig.clock()
         since: float | None = None
         said = ""
@@ -535,7 +540,7 @@ class LiveRun:
                     said = problem
                     print(f"Waiting: {problem}", flush=True)
             if now - start >= GATE_WAIT_S:
-                return f"coarse gate not met in {GATE_WAIT_S:g} s: {said or 'arm gap'}"
+                return f"coarse gate not met in {GATE_WAIT_S:g} s: {said or 'stream'}"
 
     def run(self, gate: Any) -> RunResult:
         """Take over and follow until STOP, the time limit, an event or a fault."""
@@ -1084,8 +1089,8 @@ def robot_problems(rig: Any, config: K1BridgeConfig) -> list[str]:
 
 
 def check_stream(run: LiveRun) -> str | None:
-    """Auto-check 2 (read-only): the coarse gate's conditions once, within ``STREAM_CHECK_S``
-    (fresh, calibrated, tracking on, model, stream clock, arm gap)."""
+    """Auto-check 2 (read-only): the start gate's conditions once, within ``STREAM_CHECK_S``
+    (fresh, calibrated, tracking on, model, stream clock); the arm gap is shown, not judged."""
     start = run.rig.clock()
     shown = -math.inf
     while True:
@@ -1132,8 +1137,8 @@ def stream_items(run: LiveRun, problem: str | None) -> list[tuple[str, bool | No
     arms: tuple[bool | None, str]
     if gaps:
         worst = max(gaps, key=lambda name: gaps[name])
-        arms = (gaps[worst] < COARSE_GAP_RAD, f"gap {gaps[worst]:.2f} rad at {worst} "
-                f"(limit {COARSE_GAP_RAD:g} rad)")
+        arms = (True, f"gap {gaps[worst]:.2f} rad at {worst}: after Go the robot's arms move "
+                "there slowly")
     else:
         arms = (None, "no joint state" if problem == "no joint state"
                 else "waits for the lines above")
@@ -1149,7 +1154,7 @@ def go_summary(meta: Mapping[str, Any], args: argparse.Namespace, plan: Plan,
         ("REAL ROBOT" if meta["transport"] == "booster" else "PRACTICE (fake robot)")
         + f" {meta.get('serial')}, firmware {meta.get('firmware')}",
         "Auto-check 1 (robot): PASS (walking, not fallen, fresh joint state, joints in range)",
-        "Auto-check 2 (stream): PASS (fresh, calibrated, tracking on, model, clock, arm gap)",
+        "Auto-check 2 (stream): PASS (fresh, calibrated, tracking on, model, clock)",
         f"Settings: kp {config.kp:g}, kd {config.kd:g}, speed cap {config.speed_max_rad_s:g} rad/s, "
         f"acceleration cap {config.accel_max_rad_s2:g} rad/s^2, {1.0 / CONTROL_DT:g} Hz, "
         f"stage {plan.stage}" + (f", drill {plan.drill}" if plan.drill else "")
@@ -1159,7 +1164,8 @@ def go_summary(meta: Mapping[str, Any], args: argparse.Namespace, plan: Plan,
         "Strap: " + ("clear of both arms (full arm range)" if plan.strap_clear
                      else f"NOT clear: shoulders stay within {HOIST_SHOULDER_RAD:g} rad of rest"),
         f"Roles: {ROLES[plan.stage]}",
-        "The arms take over when the performer's arms match the robot's (gap < 0.4 rad for 1 s).",
+        "After Go the robot's arms move slowly (0.2 rad/s) to the performer's arm pose, then "
+        "follow. The performer holds still until the status says following.",
         "STOP: Ctrl-C here (or the window's STOP). The real stop is the remote: LT+BACK.",
     ]
     lines += ["Warnings:"] + [f"  - {text}" for text in warnings] if warnings else ["Warnings: none"]
@@ -1221,8 +1227,7 @@ def attempt(session: Any, rig: Any, receiver: StreamReceiver, args: argparse.Nam
                     "strap_clear": strap_clear, "kp": config.kp, "kd": config.kd,
                     "speed_max_rad_s": config.speed_max_rad_s, "accel_max_rad_s2": config.accel_max_rad_s2,
                     "port": args.port, "roles": ROLES[args.stage], "support": args.support,
-                    "head": head, "coarse_gap_rad": COARSE_GAP_RAD,
-                    "align_speed_rad_s": ALIGN_SPEED_RAD_S}
+                    "head": head, "align_speed_rad_s": ALIGN_SPEED_RAD_S}
     started = session.start(plan.key, run_settings, {})
     started.data["gate_settings"] = settings
     started.data["owner_go"] = go

@@ -143,7 +143,7 @@ limits and evidence.
      (green OK, red FIX, grey "..." = not checked yet), the result and, on a red line, **what to
      do**: PC on the robot's network · robot answers · robot standing in walking mode, not fallen,
      joints in range · live tool is sending · calibrated · tracking on · model matches · clock ·
-     the performer's arms near the robot's (the gap and the 0.4 rad limit). These are the same two
+     the arm gap between performer and robot (shown only; it does not block). These are the same two
      read-only auto-checks as on the command line.
   2. **The check repeats by itself** every 2 s until every line is green, or until you click
      **Stop checking**. Fix one line and watch its lamp change. The robot never moves while it
@@ -641,7 +641,7 @@ follows it behind the same envelope, motion lock and contact check as replay.
 **Quick start (owner decision 2026-11-15).** One command from cold: without `--session` the bridge
 runs the probe (read-only, a new session), auto-check 1 (robot: walking, not fallen, fresh joint
 state, arm and head joints in range) and auto-check 2 (stream: fresh, calibrated, tracking on,
-model, clock, the performer's arms within 0.4 rad), prints a summary and starts on your Go:
+model, clock; the arm gap is shown), prints a summary and starts on your Go:
 `--go`, else it asks once. No Go, no motion. Stage-gate problems and a missing acceptance record
 are warnings in the summary; without a record the run uses attempt 049's settings (kp 40, kd 2,
 2 rad/s, 8 rad/s^2, 50 Hz). A record that is given must still be valid. The attempt file stores
@@ -671,8 +671,11 @@ bash tools/xsens/live_operator.sh gmr --robot booster_k1 --robot-stream udp://12
   this PC's clock, whatever the sender's time says.
 
 - **One run = one takeover/release cycle.** The arms take over only when the stream is fresh,
-  Calibrate was done, Tracking is on and the performer's arms are within 0.4 rad of the robot's
-  for 1 s. They first align at 0.2 rad/s or less, then follow.
+  Calibrate was done and Tracking is on for 1 s. Then the robot's arms move to the performer's
+  arm pose at 0.2 rad/s or less, from any gap, then follow. The performer holds still until the
+  status says following. Until 2026-11-16 the start refused when the performer's arms were more
+  than 0.4 rad from the robot's; a performer's natural rest pose can be further away than that
+  (0.74 rad on the first live start on a real K1), so that limit was removed.
 - **Stops.** STOP (Ctrl-C) or the time limit (default 120 s, max 600 s): the arms slow down, then go
   back to Booster. A new Calibrate, a restarted live tool or Tracking off also stops: start again.
   A performer more than 1.0 rad ahead for 1.0 s makes the arms hold, then re-align at up to

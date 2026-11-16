@@ -90,8 +90,8 @@ STEPS: list[tuple[str, str, str, str]] = [
      "approved limits from the record. Qualify the recording first (guide, step 12).",
      "The recording"),
     ("live", "13 · Live arms", "The arms follow the performer in the suit, streamed by the live "
-     "tool (--robot-stream). The arms take over only when the performer's arms match the "
-     "robot's; STOP slows them down and hands them back. Run following attempts and both "
+     "tool (--robot-stream). After Go the robot's arms move slowly to the performer's arm "
+     "pose, then follow; STOP slows them down and hands them back. Run following attempts and both "
      "drills, then Evaluate stage.", "The performer's arm motion"),
 ]
 TITLES = {key: title for key, title, _what, _moves in STEPS}
@@ -490,8 +490,8 @@ CHECK_LINES: list[tuple[str, str, str]] = [
     ("clock", "Clock",
      "Start the live tool on this laptop from the Setup console (not on another PC), then check "
      "again."),
-    ("arms", "Performer's arms near the robot's",
-     "Arms differ: performer lowers the arms like the robot's and holds still."),
+    ("arms", "Arm gap (the robot's arms move to the performer's after Go)",
+     "No arm gap yet: see the lines above."),
 ]
 PRACTICE_SENDING = "Practice robot: click 'Start practice sender' (it plays a performer)."
 
@@ -534,7 +534,7 @@ def go_warnings(detail: str) -> list[str]:
             if line.startswith("  - ")]
 
 
-PHASES = {"waiting": "WAITING for the performer's arms to match the robot's",
+PHASES = {"waiting": "WAITING for the stream (calibrated, tracking on)",
           "aligning": "ALIGNING: the arms move slowly to the performer's",
           "following": "FOLLOWING the performer",
           "lag-hold": "HOLDING: the performer moved too fast; re-aligning next",
@@ -590,10 +590,10 @@ LIVE_ADVICE = {
     "fall_state": "The robot reports a fall. Check the robot on the hoist before anything else.",
     "stream_drops": "The stream sent many bad packets. Restart the live tool, then Check and Go.",
     "run_limit": "The run waited or held too long. Check and Go again.",
-    "never followed": "The arms never reached the performer's. Performer lowers the arms like the "
-                      "robot's, then Check and Go.",
-    "coarse gate not met": "The performer's arms did not match the robot's within 60 s after Go. "
-                           "Performer lowers the arms like the robot's, then Check and Go.",
+    "never followed": "The arms never reached the performer's. The performer holds still "
+                      "after Go until the status says FOLLOWING; then Check and Go.",
+    "coarse gate not met": "The stream was not ready within 60 s after Go (see the reason: "
+                           "stream, Calibrate, Tracking). Fix it, then Check and Go.",
     "the robot changed since the checks": "The robot changed between Check and Go (see the "
                                           "reason). Fix it, then Check and Go.",
     "operator stop before the takeover": "STOP before the arms took over: nothing moved.",
@@ -1829,9 +1829,9 @@ def run_gui() -> int:  # pragma: no cover - exercised by hand and by the smoke t
         state["went"], state["checking"] = True, False
         if state["sender"] is not None:
             runner.companions.append(state["sender"])  # stopped with the run
-        write("=== Go: the arms take over when the performer's arms match the robot's.", "gui")
-        quick_result.configure(text="Go given: waiting for the performer's arms to match the "
-                               "robot's...", fg=colours["info"])
+        write("=== Go: the robot's arms move slowly to the performer's arm pose, then follow.", "gui")
+        quick_result.configure(text="Go given: the robot's arms move to the performer's; "
+                               "performer, hold still...", fg=colours["info"])
         refresh()
 
     check_button.configure(command=start_checking)
