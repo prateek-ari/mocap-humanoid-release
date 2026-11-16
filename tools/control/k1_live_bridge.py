@@ -642,7 +642,8 @@ class LiveRun:
         rpc = backend() if self.plan.head and backend is not None else None
         if rpc is None:
             return
-        self.head = HeadCommander(rpc, self.rig.transport.latest_state, clock=self.rig.clock)
+        self.head = HeadCommander(rpc, self.rig.transport.latest_state, clock=self.rig.clock,
+                                  sleeper=self.rig.sleeper)
         inhibit_on_release(self.rig.transport, self.head)
         if threaded:
             self.head.start()

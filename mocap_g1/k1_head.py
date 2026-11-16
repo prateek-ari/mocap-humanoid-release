@@ -20,8 +20,10 @@ starts again from the fresh measured head with a 0.5 rad/s ramp.  The arm loop
 feeds a lease every tick; without one for 0.1 s, or while the arms do not follow,
 the head holds its last command.  RPC errors for 0.5 s switch the head off for the
 run; the arms go on.  ``inhibit()`` (non-blocking) comes before every arm release;
-``finish()`` (after the release) sends one neutral ``RotateHeadWithTime(0, 0, 1000)``
-only when asked to (normal end or STOP) and only if the head moved.
+``finish()`` (after the release) sends the neutral ``RotateHeadWithTime(0, 0, 1000)``
+only when asked to (normal end or STOP) and only if the head moved.  The real K1 refuses
+it (code 400) right after the arm release, so a refused neutral is sent again every
+0.3 s, at most 10 times.
 """
 
 from __future__ import annotations
@@ -66,6 +68,8 @@ OFF_AFTER_S = 0.5
 ROTATE = Deadline(0.1, 0.1)
 NEUTRAL = Deadline(0.5, 1.0)
 NEUTRAL_MS = 1000
+#: The real K1 refuses the neutral (code 400) right after the arm release: send it again.
+NEUTRAL_TRIES, NEUTRAL_RETRY_S = 10, 0.3
 HEAD_LIMITS = {name: JointLimit(lower, upper, _VELOCITY[name])
                for name, (lower, upper) in HEAD_RANGES.items()}
 #: The arm envelope on the two head joints; the stall bound is off (the commander holds
@@ -210,8 +214,9 @@ class HeadCommander:
     a daemon thread (a virtual-clock run ticks it from the arm loop instead)."""
 
     def __init__(self, rpc: Any, state: Callable[[], Any], *,
-                 clock: Callable[[], float] = time.monotonic) -> None:
-        self.rpc, self.state, self.clock = rpc, state, clock
+                 clock: Callable[[], float] = time.monotonic,
+                 sleeper: Callable[[float], None] = time.sleep) -> None:
+        self.rpc, self.state, self.clock, self.sleeper = rpc, state, clock, sleeper
         self._lock = threading.Lock()
         self._inhibit = threading.Event()
         self._stop = threading.Event()
@@ -411,14 +416,18 @@ class HeadCommander:
             self.event(now, "no head neutral (head state unknown)")
         else:
             self.event(now, "head neutral requested: RotateHeadWithTime(0, 0, 1000)")
-            try:
-                result = self.rpc.call("RotateHeadWithTime", (0.0, 0.0, NEUTRAL_MS),
-                                       deadline=NEUTRAL)
-                ok, why = result.ok, result.error
-            except Exception as exc:  # noqa: BLE001 - logged; the arms are already released
-                ok, why = False, str(exc)
-            self.event(self.clock(), "head neutral confirmed (RPC returned OK)" if ok
-                       else f"head neutral failed: {why}")
+            for attempt in range(1, NEUTRAL_TRIES + 1):
+                try:
+                    result = self.rpc.call("RotateHeadWithTime", (0.0, 0.0, NEUTRAL_MS),
+                                           deadline=NEUTRAL)
+                    ok, why, again = result.ok, result.error, not result.timeout
+                except Exception as exc:  # noqa: BLE001 - logged; the arms are already released
+                    ok, why, again = False, str(exc), False
+                if ok or not again or attempt == NEUTRAL_TRIES:
+                    break
+                self.sleeper(NEUTRAL_RETRY_S)  # a refusal: the robot answered, so ask again
+            self.event(self.clock(), f"head neutral confirmed (RPC returned OK, attempt {attempt})"
+                       if ok else f"head neutral failed after {attempt} attempt(s): {why}")
         try:
             self.rpc.close()
         except Exception as exc:  # noqa: BLE001

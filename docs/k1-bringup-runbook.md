@@ -708,12 +708,18 @@ the K1 head has no roll.
 - **The head holds** (stays where it is) while the arms align, while the arms hold for lag, and
   when the stream is stale (no new packet for 0.1 s).
 - **At the end.** After a normal end or STOP, the head returns to straight (one 1 s move, after
-  the arms are released). After a fall or a fault there is no head command at all.
+  the arms are released). The real K1 refuses this move (code 400) right after the arm release,
+  so the bridge sends it again every 0.3 s, at most 10 times. After a fall or a fault there is
+  no head command at all.
 - **A head problem is not an arm stop.** If head commands fail for 0.5 s, only the head switches
   off for this run: the status shows `head off` and the arms continue.
-- **First check on the real robot (not yet done).** On the practice robot with the real Xsens
-  capture (2026-11-15) the head ran 120 s: 6000 head commands, 0 failures, straight after the
-  release. The real robot has not run it. Hold the robot as for the arms, then turn the
+- **First run on the real robot (2026-11-16).** Robot on the hoist, the 2026-11-15 Xsens capture
+  played back as the performer, arms and head, 60 s: PASS. 2916 head commands, 0 failures; the
+  head turned -45° to +42° and looked down up to 12°; command against measured, 95th percentile:
+  1.4° (turn), 0.3° (up/down). The end move was refused (code 400) 1 ms after the arm release
+  and the head stayed at its last angle; the same call worked later with the robot idle. The
+  fix above (send it again) has not run on the robot yet.
+- **Direction check with a live performer (not yet done).** Hold the robot as for the arms, then turn the
   performer's head **slowly** left, right, up and down. Confirm that the robot's head looks the
   same way each time (performer looks left: the robot looks to its left; performer looks down: the
   robot looks down). If a direction is wrong, press STOP and run again with `--no-head` (or
