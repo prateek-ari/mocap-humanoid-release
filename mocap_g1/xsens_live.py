@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 import math
 import socket
+import sys
 import time
 from typing import Callable, Iterable
 
@@ -290,7 +291,12 @@ class LatestBodyReceiver:
     def _recv(self) -> tuple[bytes, tuple[str, int]]:
         data, source = self.socket.recvfrom(65535)
         if self.tap is not None:
-            self.tap(data, source)
+            try:
+                self.tap(data, source)
+            except Exception as exc:  # noqa: BLE001 - a recorder fault must never stop live input
+                self.tap = None
+                print(f"SUIT RECORDING OFF: the recorder failed ({exc}); live input goes on",
+                      file=sys.stderr, flush=True)
         return data, source
 
     def _confirm_restart(self, counter: int) -> bool:
