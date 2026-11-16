@@ -1162,3 +1162,5 @@ html[data-theme='dark'] .live-host label.selected { color: var(--display); }
   .lamp { forced-color-adjust: none; }
   .stop-key { border: 2px solid ButtonText; }
 }
+.sender-helper { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; }
+.calibrate-steps { margin: 0; padding-left: 22px; }

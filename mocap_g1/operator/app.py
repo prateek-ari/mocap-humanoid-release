@@ -758,7 +758,7 @@ def create_app(
         task.add_done_callback(on_watchdog_done)
         application.state.watchdog_task = task
         if setup is not None:
-            # App mode only: watch the Xsens port for the Setup screen.
+            # Watch the Xsens port for the Setup screen (on demand on the Ubuntu console).
             try:
                 await asyncio.to_thread(setup.start_stream_monitor)
             except Exception:

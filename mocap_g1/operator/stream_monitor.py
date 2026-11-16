@@ -13,6 +13,12 @@ reopens only when every pause has been resumed.  When another program holds
 the port the state is ``port_busy`` and the bind is retried every
 ``retry_s``.
 
+With ``idle_s`` set (the Ubuntu Setup console) the monitor is on demand: it
+holds the port only while :meth:`snapshot` was called within the last
+``idle_s`` seconds, so a live tool started from a terminal finds the port
+free when nobody looks at the stream steps.  It then reports ``off`` until a
+snapshot wakes it.
+
 Parsing reuses :mod:`mocap_g1.mxtp02`; ``clock`` and ``socket_factory`` are
 injectable for tests.  All public methods are thread-safe.
 """
@@ -20,6 +26,7 @@ injectable for tests.  All public methods are thread-safe.
 from __future__ import annotations
 
 from collections import deque
+import math
 import socket
 import threading
 import time
@@ -38,6 +45,8 @@ STREAM_STATES = ("off", "none", "receiving", "stale", "port_busy", "paused")
 WINDOW_S = 2.0
 #: A body packet younger than this means the stream is ``receiving``.
 RECEIVING_S = 1.0
+#: A sender whose last body packet is younger than this is listed in ``senders``.
+SENDER_FRESH_S = 2.0
 #: A sample-counter jump larger than this is a stream restart, not loss.
 _RESTART_GAP = 10_000
 _BODY_ID = b"MXTP02"
@@ -69,6 +78,7 @@ class StreamMonitor:
         socket_factory: Callable[[], Any] = default_socket_factory,
         poll_s: float = 0.2,
         retry_s: float = 2.0,
+        idle_s: float | None = None,
     ) -> None:
         self._bind = bind
         self._port = int(port)
@@ -76,6 +86,8 @@ class StreamMonitor:
         self._socket_factory = socket_factory
         self.poll_s = float(poll_s)
         self.retry_s = float(retry_s)
+        self.idle_s = None if idle_s is None else float(idle_s)
+        self._wanted_at = -math.inf  # time.monotonic() of the last snapshot (idle_s mode)
         self._lock = threading.Lock()
         self._changed = threading.Condition(self._lock)
         self._thread: threading.Thread | None = None
@@ -161,7 +173,10 @@ class StreamMonitor:
     def snapshot(self) -> dict[str, Any]:
         """The StreamSnapshot document (see the Windows app contracts)."""
 
-        with self._lock:
+        with self._changed:
+            if self.idle_s is not None:
+                self._wanted_at = time.monotonic()
+                self._changed.notify_all()
             now = self._clock()
             self._expire_locked(now)
             state = self._state
@@ -173,6 +188,9 @@ class StreamMonitor:
                 "bind": self._bind,
                 "port": self._port,
                 "source": self._source,
+                # Every IPv4 address that sent body packets in the last SENDER_FRESH_S.
+                "senders": sorted(ip for ip, at in self._senders.items()
+                                  if now - at < SENDER_FRESH_S),
                 "rate_hz": self._rate_locked(now),
                 "loss_fraction": self._loss_locked(),
                 "body_frames": self._body_frames,
@@ -189,6 +207,7 @@ class StreamMonitor:
         self._body_frames = 0
         self._malformed = 0
         self._source: str | None = None
+        self._senders: dict[str, float] = {}  # IPv4 -> last body packet time
         self._last_body_at: float | None = None
         self._first_body_at: float | None = None
 
@@ -197,6 +216,8 @@ class StreamMonitor:
             self._body.popleft()
         while self._joint_times and now - self._joint_times[0] > WINDOW_S:
             self._joint_times.popleft()
+        for ip in [ip for ip, at in self._senders.items() if now - at > WINDOW_S]:
+            del self._senders[ip]
 
     def _rate_locked(self, now: float) -> float | None:
         if not self._body_frames or self._first_body_at is None:
@@ -242,6 +263,7 @@ class StreamMonitor:
                 self._last_body_at = received_at
                 if source is not None:
                     self._source = f"{source[0]}:{source[1]}"
+                    self._senders[source[0]] = received_at
             elif data[:6] == _JOINT_ANGLES_ID:
                 try:
                     parse_joint_angles_datagram(data)
@@ -257,7 +279,9 @@ class StreamMonitor:
     # --------------------------------------------------------------- thread
 
     def _wanted_locked(self) -> bool:
-        return not self._closed and self._pauses == 0
+        if self._closed or self._pauses:
+            return False
+        return self.idle_s is None or time.monotonic() - self._wanted_at < self.idle_s
 
     def _set_socket(self, sock: Any) -> None:
         with self._changed:
@@ -274,8 +298,8 @@ class StreamMonitor:
     def _run(self) -> None:
         while True:
             with self._changed:
-                while not self._closed and self._pauses:
-                    self._state = "paused"
+                while not self._closed and not self._wanted_locked():
+                    self._state = "paused" if self._pauses else "off"
                     self._changed.wait()
                 if self._closed:
                     self._state = "off"
@@ -344,6 +368,7 @@ def off_snapshot(*, bind: str = "0.0.0.0", port: int = 5555) -> dict[str, Any]:
         "bind": bind,
         "port": int(port),
         "source": None,
+        "senders": [],
         "rate_hz": None,
         "loss_fraction": None,
         "body_frames": 0,

@@ -95,6 +95,8 @@ On the recorded route the network fields are replaced by the runtime folder, the
 
 A field with a problem turns red with the reason underneath; fix it and save again. For the next take, click **New session**: it fills in your previous answers and a fresh folder.
 
+The **Software** box at the top of step 03 shows the **Running version** (commit and date of this checkout) and the **Last update** (the result line of the last **Mocap Update**: time, PASS or FAIL, old commit -> new commit; a failure is shown in red with what to do). To update: stop the console (**Shut down the console** in step 11), then open **Mocap Update** from the applications menu.
+
 **Done when:** the console shows `Saved …/session.env` and the system check says **PASS**.
 
 ## 04 · Fit and calibrate the suit (Windows)
@@ -146,7 +148,9 @@ If both routers use the same subnet, see [overlapping networks](engineer-referen
 
 ## 06 · Check the real stream
 
-With Xsens still streaming, open **06 Check the stream** and click **Run 30-second check**. Keep streaming until the verdict appears.
+With Xsens still streaming, open **06 Check the stream**. A line under the IP addresses shows where the Xsens data comes from. Green: from the **Windows Xsens IP** of the session. Red with a **Use <address>** button: the data comes from another address; click it to save that address in the session (a running live simulation must then be stopped and started again; the button does not fix routing or a firewall). Two senders are shown as such, without a button: stop the stream on all but one PC. The console listens on the Xsens port only while step 06 or 07 is open.
+
+Click **Run 30-second check**. Keep streaming until the verdict appears.
 
 ![Step 06: the 30-second stream check passed; the report is saved in the session folder](engineer-guide-assets/setup-06-stream.png)
 
@@ -160,10 +164,10 @@ With Xsens still streaming, open **06 Check the stream** and click **Run 30-seco
 
 Open **07 Live simulation**. It shows the robot and height from your session.
 
-1. Optional: tick **Auto-calibrate after** (for example 5 s) if the performer works alone, and **Record video** to save an MP4. With the Booster K1 on the Ubuntu PC, **Send the arms to the K1 window** (`udp://127.0.0.1:47011`) also sends the robot's arm motion to step 13 · Live arms of the K1 test window (see step 13). It is ticked by default once the K1 test tools are installed; untick it if you do not run that step. With it ticked, the live simulation uses a faster motion filter (`--filter-min-cutoff 3 --filter-beta 1.5`), so the real arms follow with less delay.
+1. Optional: tick **Auto-calibrate after** (for example 5 s) if the performer works alone (not offered while **Send the arms to the K1 window** is ticked: the real K1 is calibrated only by your click), and **Record video** to save an MP4. With the Booster K1 on the Ubuntu PC, **Send the arms to the K1 window** (`udp://127.0.0.1:47011`) also sends the robot's arm motion to step 13 · Live arms of the K1 test window (see step 13). It is ticked by default once the K1 test tools are installed; untick it if you do not run that step. With it ticked, the live simulation uses a faster motion filter (`--filter-min-cutoff 3 --filter-beta 1.5`), so the real arms follow with less delay.
 2. Click **Start live simulation**. A MuJoCo window opens on this PC.
 3. Start or resume Xsens streaming within 60 seconds. The log shows `Receiving Xsens body frames`.
-4. **Calibrate once per session:** the performer stands still, arms relaxed at the sides, looking straight ahead. Click **Calibrate** under the Start buttons (or click the MuJoCo window and press **N**, or wait for the auto-calibration). The **Calibrated** lamp turns green. This puts the robot's feet on the floor (and, for the T1, calibrates arm orientation). With **Send the arms to the K1 window** ticked, the K1 head also takes its zero here. A new Calibrate stops a running K1 arm run; start it again in the K1 window.
+4. **Calibrate once per session:** click **Calibrate** under the Start buttons. The console first shows what to tell the performer (stand up straight, arms down at the sides, look straight ahead, hold still); then click **Calibrate now**. The line under the buttons shows **Calibrating...**, then **Calibrated**, **Calibrated, but ...** (a warning, for example that the performer is not standing), the failure, or after 5 s **No answer from the live simulation**. (Also possible: click the MuJoCo window and press **N**, or wait for the auto-calibration.) The **Calibrated** lamp turns green. This puts the robot's feet on the floor (and, for the T1, calibrates arm orientation). With **Send the arms to the K1 window** ticked, the K1 head also takes its zero here. A new Calibrate stops a running K1 arm run; start it again in the K1 window.
    **Tracking on / Tracking off** next to it turns arm and waist tracking on or off; the **Tracking on** lamp shows the state and why tracking is off. The buttons unlock with the first Xsens frame; if one fails, the message under it says why.
 5. Click **Stop** when you are done. A recorded video is copied into the session folder and listed under **Recorded videos**, where you can play it in the browser.
 

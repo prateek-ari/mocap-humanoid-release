@@ -97,6 +97,16 @@ export interface LiveStatus {
   calibrated: boolean
 }
 
+/** One ``calibration_result`` STATUS event of a live job (``request`` null: N key or timer). */
+export interface CalibrationResult {
+  request: number | null
+  ok: boolean
+  epoch: number | null
+  epoch_changed: boolean
+  warning: string | null
+  reason: string | null
+}
+
 export interface JobSummary {
   id: string
   kind: string
@@ -109,6 +119,15 @@ export interface JobSummary {
   outputs: string[]
   /** Live jobs only, after their first STATUS line; ``null`` (or absent) otherwise. */
   live?: LiveStatus | null
+  /** Live jobs: ``calibrate`` requests sent by the console and the results received. */
+  calibration?: { sent: number; results: CalibrationResult[] } | null
+}
+
+/** The checkout's commit and the last Mocap Update result (Ubuntu console only). */
+export interface SoftwareInfo {
+  commit: string | null
+  /** ``null``: never updated with Mocap Update. */
+  update_last: { line: string; result: 'PASS' | 'FAIL' | null; details: string[] } | null
 }
 
 /** The console runs inside the Windows desktop app (``MOCAP_APP=1``). */
@@ -126,6 +145,8 @@ export interface StreamSnapshot {
   port: number
   /** Last body-packet sender, ``host:port``. */
   source: string | null
+  /** IPv4 addresses that sent body packets in the last 2 s. */
+  senders: string[]
   rate_hz: number | null
   loss_fraction: number | null
   body_frames: number
@@ -182,6 +203,7 @@ export interface SetupState {
   jobs: JobSummary[]
   /** Length of the stream check (``acceptance``) in seconds. */
   stream_check_s: number
+  software: SoftwareInfo | null
 }
 
 export interface JobLog {
@@ -340,6 +362,7 @@ export function parseStreamSnapshot(value: unknown): StreamSnapshot | null {
     bind: str(value.bind),
     port: Number.isInteger(port) && port > 0 && port < 65536 ? port : 5555,
     source: typeof value.source === 'string' && value.source.trim() ? value.source.trim() : null,
+    senders: Array.isArray(value.senders) ? value.senders.filter((item): item is string => typeof item === 'string' && item !== '') : [],
     rate_hz: nonNegative(value.rate_hz),
     loss_fraction: loss === null ? null : Math.min(1, loss),
     body_frames: Math.floor(nonNegative(value.body_frames) ?? 0),
@@ -375,6 +398,33 @@ export function parseLiveStatus(value: unknown): LiveStatus | null {
   }
 }
 
+function parseCalibrationResult(value: unknown): CalibrationResult | null {
+  if (!isRecord(value) || typeof value.ok !== 'boolean') return null
+  const whole = (item: unknown) => typeof item === 'number' && Number.isInteger(item) ? item : null
+  const text = (item: unknown) => typeof item === 'string' && item.trim() ? item.trim() : null
+  return {
+    request: whole(value.request),
+    ok: value.ok,
+    epoch: whole(value.epoch),
+    epoch_changed: value.epoch_changed === true,
+    warning: text(value.warning),
+    reason: text(value.reason),
+  }
+}
+
+export function parseSoftware(value: unknown): SoftwareInfo | null {
+  if (!isRecord(value)) return null
+  const last = isRecord(value.update_last) ? value.update_last : null
+  return {
+    commit: typeof value.commit === 'string' && value.commit.trim() ? value.commit.trim() : null,
+    update_last: last === null ? null : {
+      line: str(last.line),
+      result: last.result === 'PASS' || last.result === 'FAIL' ? last.result : null,
+      details: Array.isArray(last.details) ? last.details.filter((item): item is string => typeof item === 'string') : [],
+    },
+  }
+}
+
 export function parseJobSummary(value: unknown): JobSummary | null {
   if (!isRecord(value) || typeof value.id !== 'string' || !value.id || typeof value.kind !== 'string') return null
   if (typeof value.state !== 'string' || !JOB_STATES.has(value.state)) return null
@@ -389,6 +439,10 @@ export function parseJobSummary(value: unknown): JobSummary | null {
     summary: typeof value.summary === 'string' && value.summary.trim() ? value.summary : null,
     outputs: Array.isArray(value.outputs) ? value.outputs.filter((item): item is string => typeof item === 'string') : [],
     live: value.kind === 'live' ? parseLiveStatus(value.live) : null,
+    calibration: value.kind === 'live' && isRecord(value.calibration) ? {
+      sent: Math.max(0, Math.floor(num(value.calibration.sent, 0))),
+      results: list(value.calibration.results, parseCalibrationResult),
+    } : null,
   }
 }
 
@@ -441,6 +495,7 @@ export function parseSetupState(value: unknown): SetupState {
     files: list(value.files, parseFile),
     jobs: list(value.jobs, parseJobSummary),
     stream_check_s: typeof value.stream_check_s === 'number' && Number.isFinite(value.stream_check_s) && value.stream_check_s > 0 ? value.stream_check_s : 30,
+    software: parseSoftware(value.software),
   }
 }
 
@@ -577,13 +632,15 @@ export class SetupClient {
   }
 
   /** Send a key-equivalent command to the running live simulation (202 accepted). */
-  async controlJob(id: string, command: ControlCommand): Promise<void> {
+  async controlJob(id: string, command: ControlCommand): Promise<number | null> {
     if (!CONTROL_COMMANDS.has(command)) throw new SetupApiError(`Unknown command: ${String(command)}`, 400)
     const response = await setupRequest(`/jobs/${encodeURIComponent(id)}/control`, {
       method: 'POST',
       body: JSON.stringify({ command }),
     })
-    await json(response)
+    const body = await json(response)
+    // ``request``: this calibrate's number in the job; its result carries the same number.
+    return isRecord(body) && typeof body.request === 'number' ? body.request : null
   }
 
   /** Stop a leftover live viewer container (409 ``viewer_running``). */

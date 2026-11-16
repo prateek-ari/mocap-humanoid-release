@@ -22,6 +22,7 @@ import {
   type SetupFile,
   type SetupRoute,
   type SetupState,
+  type StreamSnapshot,
 } from './setupApi'
 import type { Led } from './status'
 
@@ -31,6 +32,11 @@ export const SETUP_STEPS: readonly SetupStep[] = ['session', 'windows', 'stream'
 
 /** Job polling interval while a job is running. */
 export const JOB_POLL_MS = 500
+
+/** Stream monitor polling interval while the stream or live step is open (Ubuntu console). */
+export const SENDER_POLL_MS = 1000
+/** A calibrate without a result after this long shows "No answer". */
+export const CALIBRATION_ANSWER_MS = 5000
 
 /** Shown for a job that 404s while polled: the console restarted and lost it. */
 export const LOST_JOB_SUMMARY = 'The console restarted; this job is no longer tracked.'
@@ -429,6 +435,13 @@ export function SetupView({ client, initial, hidden = false }: SetupViewProps) {
   const [robotStream, setRobotStream] = useState<boolean | null>(null)
   const [controlPending, setControlPending] = useState<ControlCommand | null>(null)
   const [controlError, setControlError] = useState<string | null>(null)
+  // C2: the performer's steps are shown before calibrate is sent; then its result is bound to job + request.
+  const [calibrateAsk, setCalibrateAsk] = useState<string | null>(null)
+  const [calibration, setCalibration] = useState<{ jobId: string; request: number | null; sentAt: number } | null>(null)
+  // C1: the Ubuntu console's stream monitor, read while the stream or live step is open.
+  const [sender, setSender] = useState<StreamSnapshot | null>(null)
+  const [usingSender, setUsingSender] = useState(false)
+  const [senderNotice, setSenderNotice] = useState<{ message: string; error: boolean } | null>(null)
   const [renderMotion, setRenderMotion] = useState<'preview' | 'npose'>('preview')
   const [playing, setPlaying] = useState<string | null>(null)
   const [k1, setK1] = useState<K1Status | null>(null)
@@ -576,6 +589,44 @@ export function SetupView({ client, initial, hidden = false }: SetupViewProps) {
       if (aliveRef.current) setLogs((current) => current[stepJobId] ? current : { ...current, [stepJobId]: { job: stepJob!, lines: [] } })
     })
   }, [client, stepJobId, stepJob])
+
+  const senderStep = !windows && (step === 'stream' || step === 'live')
+  useEffect(() => {
+    if (!senderStep || hidden) return
+    let active = true
+    let timer: number | undefined
+    const tick = async () => {
+      try {
+        const next = await client.getStream()
+        if (active && aliveRef.current) setSender(next)
+      } catch {
+        if (active && aliveRef.current) setSender(null)
+      }
+      if (active) timer = window.setTimeout(() => void tick(), SENDER_POLL_MS)
+    }
+    void tick()
+    return () => {
+      active = false
+      if (timer !== undefined) window.clearTimeout(timer)
+    }
+  }, [client, senderStep, hidden])
+
+  async function adoptSender(address: string) {
+    if (!session) return
+    setUsingSender(true)
+    setSenderNotice(null)
+    try {
+      const next = await client.saveSession({ ...session, windows_xsens_ip: address })
+      if (!aliveRef.current) return
+      setSetup(next)
+      setDraft((current) => ({ ...current, windows_xsens_ip: address }))
+      setSenderNotice({ error: false, message: `Saved: the session now takes Xsens data from ${address}. A running live simulation keeps the old address: stop it and start it again. This does not fix network routing or a firewall.` })
+    } catch (reason) {
+      if (aliveRef.current) setSenderNotice({ error: true, message: errorMessage(reason, 'The address was not saved.') })
+    } finally {
+      if (aliveRef.current) setUsingSender(false)
+    }
+  }
 
   const refreshK1 = useCallback(async () => {
     try {
@@ -893,8 +944,22 @@ export function SetupView({ client, initial, hidden = false }: SetupViewProps) {
   )
 
   function renderSession() {
+    const software = setup.software
+    const last = software?.update_last ?? null
     return (
       <>
+        {software && (
+          <fieldset className="group" aria-label="Software">
+            <legend className="silk">Software</legend>
+            <div className="plate-row">
+              <ValuePlate label="Running version" value={software.commit ?? 'unknown'} copy={false} />
+              <ValuePlate label="Last update" value={last ? last.line : 'Mocap Update has not run on this PC'} copy={false} />
+            </div>
+            {last?.result === 'FAIL' && <ActionError message={`The last update failed. ${last.details.join(' ')}`.trim()} />}
+            {last?.result === 'PASS' && last.details.length > 0 && <p className="group-note">{last.details.join(' ')}</p>}
+            <p className="group-note">To update: stop the console (step 11 · Shut down the console), then open <strong>Mocap Update</strong> from the applications menu.</p>
+          </fieldset>
+        )}
         <form className="setup-form" onSubmit={(event) => { event.preventDefault(); void saveSession() }} noValidate>
           <fieldset className="group">
             <legend className="silk">Robot and performer</legend>
@@ -1118,6 +1183,86 @@ export function SetupView({ client, initial, hidden = false }: SetupViewProps) {
     )
   }
 
+  /** C2: the result of this console's last calibrate, matched by job id and request number. */
+  function calibrationLine(job: JobSummary) {
+    if (!calibration || calibration.jobId !== job.id) return null
+    const result = calibration.request === null ? undefined
+      : job.calibration?.results.find((item) => item.request === calibration.request)
+    let lamp: Led = 'active'
+    let text: string
+    if (result) {
+      const note = result.warning ?? result.reason
+      if (result.ok && !note) {
+        lamp = 'passed'
+        text = 'Calibrated.'
+      } else if (result.ok || result.epoch_changed) {
+        lamp = 'next'
+        text = `Calibrated, but ${result.reason ?? result.warning}${result.reason && result.warning ? ` ${result.warning}` : ''}`
+      } else {
+        lamp = 'fault'
+        text = `Calibration failed: ${note ?? 'no reason given'}. The earlier calibration stays. Calibrate again.`
+      }
+    } else if (job.state !== 'running') {
+      lamp = 'fault'
+      text = 'The live simulation stopped before it answered the Calibrate.'
+    } else if (nowMs - calibration.sentAt >= CALIBRATION_ANSWER_MS) {
+      lamp = 'fault'
+      text = 'No answer from the live simulation. Look at the Calibrated lamp, then Calibrate again if needed.'
+    } else {
+      text = 'Calibrating…'
+    }
+    return <p className={`saved-note${lamp === 'passed' ? '' : ' is-dirty'}`} role="status" aria-label="Calibration result"><Lamp state={lamp} /><span>{text}</span></p>
+  }
+
+  /** C1: where the Xsens data comes from, with a button when it is not the session's source. */
+  function senderPanel() {
+    if (windows) return null
+    const expected = session?.windows_xsens_ip ?? ''
+    const port = sender?.port ?? Number(STREAM_PORT)
+    let lamp: Led = 'off'
+    let text: ReactNode
+    let other: string | null = null
+    if (!sender || sender.state === 'off') {
+      text = `Listening on UDP port ${port}…`
+    } else if (sender.state === 'paused') {
+      text = 'A running job uses the Xsens port. The sender shows again when it ends.'
+    } else if (sender.state === 'port_busy') {
+      lamp = 'fault'
+      text = `Another program uses UDP port ${port}. Close it (a live tool started in a terminal?) to see the sender here.`
+    } else if (sender.senders.length > 1) {
+      lamp = 'fault'
+      text = <>Xsens data comes from {sender.senders.length} senders: <strong className="mono">{sender.senders.join(', ')}</strong>. Stop the stream on all but one Xsens PC.</>
+    } else if (sender.senders.length === 1 && sender.senders[0] === expected) {
+      lamp = 'passed'
+      text = <>Xsens data arrives from <strong className="mono">{expected}</strong>, the source in this session.</>
+    } else if (sender.senders.length === 1) {
+      lamp = 'fault'
+      other = sender.senders[0]
+      text = <>Xsens data arrives from <strong className="mono">{other}</strong>, but the session expects <strong className="mono">{expected || 'no address'}</strong>. The live simulation ignores data from other addresses.</>
+    } else if (sender.body_frames > 0) {
+      lamp = 'next'
+      const age = sender.last_packet_age_s
+      text = <>No new Xsens data{age !== null ? ` for ${Math.round(age)} s` : ''}{sender.source ? <> (last from <span className="mono">{sender.source.split(':')[0]}</span>)</> : null}. Is Xsens still streaming?</>
+    } else {
+      lamp = 'next'
+      text = `No Xsens data on UDP port ${port}. Start streaming in Xsens to this PC, port ${port}.`
+    }
+    return (
+      <div className="sender-helper" role="status" aria-label="Xsens sender">
+        <p className={`saved-note${lamp === 'passed' ? '' : ' is-dirty'}`}><Lamp state={lamp} /><span>{text}</span></p>
+        {other && session && (
+          <div className="setup-actions">
+            <button type="button" className="panel-key is-primary" disabled={usingSender} onClick={() => void adoptSender(other)}>
+              {usingSender ? <RefreshCw className="spin" aria-hidden="true" /> : <Check aria-hidden="true" />}Use {other}
+            </button>
+            <span className="group-note">Saves it as the Xsens source IP of this session.</span>
+          </div>
+        )}
+        {senderNotice && (senderNotice.error ? <ActionError message={senderNotice.message} /> : <p className="group-note">{senderNotice.message}</p>)}
+      </div>
+    )
+  }
+
   function renderStream() {
     // Same PC on Windows: the receiver is reached through loopback.
     const receiverIp = session?.linux_xsens_ip || (windows && session && isLoopbackIp(session.windows_xsens_ip) ? LOOPBACK_IP : '')
@@ -1129,6 +1274,7 @@ export function SetupView({ client, initial, hidden = false }: SetupViewProps) {
             <ValuePlate label={windows ? 'From Xsens' : 'From Windows'} value={session?.windows_xsens_ip ?? ''} copy={false} />
             <ValuePlate label={windows ? 'To this PC' : 'To Linux'} value={receiverIp ? `${receiverIp}:${STREAM_PORT}` : ''} copy={false} />
           </div>
+          {senderPanel()}
           <div className="setup-actions">
             {runKey('stream', 'acceptance', `Run ${checkSeconds}-second check`, <Play aria-hidden="true" />)}
             <span className="group-note">Keep Xsens streaming until the verdict shows. The report is saved in the session folder.</span>
@@ -1165,12 +1311,16 @@ export function SetupView({ client, initial, hidden = false }: SetupViewProps) {
     const streamable = robotId === 'booster_k1' && !windows
     const sendArms = streamable && (robotStream ?? k1?.installed === true)
     const live = liveRunning && liveJob?.kind === 'live' ? liveJob.live ?? null : null
+    // The real K1 is never calibrated by a timer: only by the operator's click (plan C2).
+    const autoAllowed = !sendArms
+    const calibrateAfterS = autoAllowed && autoCalibrate ? calibrate : null
     async function control(command: ControlCommand) {
       if (!liveJob || !liveRunning) return
       setControlError(null)
       setControlPending(command)
       try {
-        await client.controlJob(liveJob.id, command)
+        const request = await client.controlJob(liveJob.id, command)
+        if (command === 'calibrate' && aliveRef.current) setCalibration({ jobId: liveJob.id, request, sentAt: Date.now() })
       } catch (reason) {
         if (!aliveRef.current) return
         setControlError(reason instanceof SetupApiError && reason.status === 409
@@ -1189,13 +1339,16 @@ export function SetupView({ client, initial, hidden = false }: SetupViewProps) {
             <ValuePlate label="Robot" value={robotName} copy={false} />
             <ValuePlate label="Performer height" value={session ? `${session.human_height_m} m` : ''} copy={false} />
           </div>
+          {!liveRunning && senderPanel()}
           <div className="setup-options">
-            <label className="check-option">
-              <input type="checkbox" checked={autoCalibrate} onChange={(event) => setAutoCalibrate(event.target.checked)} />
-              <span>Auto-calibrate after</span>
-              <input className="mono short-input" type="number" step="0.5" min="0.5" max="60" value={calibrateAfter} disabled={!autoCalibrate} aria-label="Seconds before auto-calibration" aria-invalid={calibrateInvalid || undefined} onChange={(event) => setCalibrateAfter(event.target.value)} />
-              <span>s</span>
-            </label>
+            {autoAllowed && (
+              <label className="check-option">
+                <input type="checkbox" checked={autoCalibrate} onChange={(event) => setAutoCalibrate(event.target.checked)} />
+                <span>Auto-calibrate after</span>
+                <input className="mono short-input" type="number" step="0.5" min="0.5" max="60" value={calibrateAfter} disabled={!autoCalibrate} aria-label="Seconds before auto-calibration" aria-invalid={calibrateInvalid || undefined} onChange={(event) => setCalibrateAfter(event.target.value)} />
+                <span>s</span>
+              </label>
+            )}
             <label className="check-option">
               <input type="checkbox" checked={liveVideo} onChange={(event) => setLiveVideo(event.target.checked)} />
               <span>Record video</span>
@@ -1207,9 +1360,9 @@ export function SetupView({ client, initial, hidden = false }: SetupViewProps) {
               </label>
             )}
           </div>
-          {calibrateInvalid && <span className="field-error" role="alert">Use 0.5 to 60 seconds.</span>}
+          {autoAllowed && calibrateInvalid && <span className="field-error" role="alert">Use 0.5 to 60 seconds.</span>}
           <div className="setup-actions">
-            {runKey('live', 'live', 'Start live simulation', <Play aria-hidden="true" />, { calibrate_after_s: autoCalibrate ? calibrate : null, record_video: liveVideo, ...(streamable ? { robot_stream: sendArms } : {}) }, true, calibrateInvalid || noDisplay)}
+            {runKey('live', 'live', 'Start live simulation', <Play aria-hidden="true" />, { calibrate_after_s: calibrateAfterS, record_video: liveVideo, ...(streamable ? { robot_stream: sendArms } : {}) }, true, (autoAllowed && calibrateInvalid) || noDisplay)}
             {setup.desktop_tools && runKey('live', 'compare', 'Start G1 + T1 side by side', <Columns2 aria-hidden="true" />, { calibrate_after_s: autoCalibrate ? calibrate : null }, false, calibrateInvalid || noDisplay)}
             {liveRunning && liveJob && (
               <button type="button" className="panel-key setup-run is-stop" disabled={isStopping(liveJob.id)} onClick={() => void stopJob(liveJob)}>
@@ -1230,9 +1383,29 @@ export function SetupView({ client, initial, hidden = false }: SetupViewProps) {
                   <span>Tracking on <strong>{live ? live.enabled ? 'yes' : 'no' : '—'}</strong>{live?.reason ? <small className="mono">{live.reason}</small> : null}</span>
                 </span>
               </div>
-              {sendArms && <p className="live-calibrate-note">Calibrate with the performer standing still, arms down, looking straight ahead: the K1 head takes its zero here. A new Calibrate stops a running K1 arm run; start it again in the K1 window.</p>}
+              {sendArms && <p className="live-calibrate-note">The K1 head takes its zero at Calibrate. A new Calibrate stops a running K1 arm run; start it again in the K1 window.</p>}
+              {calibrateAsk === liveJob.id && (
+                <div className="setup-callout is-warning" role="alertdialog" aria-label="Calibrate now?">
+                  <AlertTriangle aria-hidden="true" />
+                  <div>
+                    <p><strong>Tell the performer:</strong></p>
+                    <ol className="calibrate-steps">
+                      <li>Stand up straight.</li>
+                      <li>Arms down at the sides.</li>
+                      <li>Look straight ahead.</li>
+                      <li>Hold still until it says Calibrated.</li>
+                    </ol>
+                    <div className="setup-actions">
+                      <button type="button" className="panel-key is-primary" disabled={controlPending !== null || !live} onClick={() => { setCalibrateAsk(null); void control('calibrate') }}>
+                        <Crosshair aria-hidden="true" />Calibrate now
+                      </button>
+                      <button type="button" className="panel-key" onClick={() => setCalibrateAsk(null)}>Cancel</button>
+                    </div>
+                  </div>
+                </div>
+              )}
               <div className="live-keys" role="group" aria-label="Simulation controls">
-                <button type="button" className="panel-key" disabled={controlPending !== null || !live} onClick={() => void control('calibrate')}>
+                <button type="button" className="panel-key" disabled={controlPending !== null || !live || calibrateAsk === liveJob.id} onClick={() => setCalibrateAsk(liveJob.id)}>
                   {controlPending === 'calibrate' ? <RefreshCw className="spin" aria-hidden="true" /> : <Crosshair aria-hidden="true" />}Calibrate<kbd>N</kbd>
                 </button>
                 <button type="button" className="panel-key" aria-pressed={live?.enabled ?? false} disabled={controlPending !== null || !live} onClick={() => void control('toggle_tracking')}>
@@ -1243,6 +1416,7 @@ export function SetupView({ client, initial, hidden = false }: SetupViewProps) {
               {controlError && <span className="field-error" role="alert">{controlError}</span>}
             </>
           )}
+          {liveJob && calibrationLine(liveJob)}
           {consoleFor(stepJob, undefined, !(liveRunning && stepJob?.id === liveJob?.id))}
         </fieldset>
         <div className="live-columns">

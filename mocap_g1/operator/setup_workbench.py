@@ -12,7 +12,9 @@ With ``MOCAP_APP=1`` (the installed Windows app) the workbench keeps its
 writable state (``session.env``, ``prefs.json``) under ``MOCAP_STATE_DIR``
 because the project folder is read-only, runs the bundled interpreter
 (``MOCAP_RUNTIME_PYTHON``), and owns a :class:`StreamMonitor` that shows
-whether Xsens data is arriving.  Without ``MOCAP_APP`` nothing changes.
+whether Xsens data is arriving.  The Ubuntu checkout console has an on-demand
+monitor instead: it listens only while the stream or live step is open and
+shows which address the data comes from (``senders``).
 
 It never touches the robot ``SessionController`` and never grants command
 authority.  Every job is an argv list (never a shell); ``session.env`` is
@@ -159,6 +161,13 @@ UFW = "/usr/sbin/ufw"
 CONTROL_COMMANDS = ("calibrate", "toggle_tracking", "rearm")
 #: The machine status line live_g1_sim.py prints: ``STATUS {json LiveStatus}``.
 STATUS_PREFIX = "STATUS "
+#: A live job keeps this many calibration results (the console matches its own request).
+MAX_CALIBRATION_RESULTS = 20
+#: The Ubuntu console's on-demand stream monitor lets go of the Xsens port this long
+#: after the last GET /api/v1/setup/stream (the stream and live steps poll it).
+STREAM_IDLE_S = 10.0
+#: Written by tools/setup/update.sh ("Mocap Update") in the user state folder.
+UPDATE_LAST_NAME = "update-last.txt"
 APP_MODE = "windows_app"
 PREFS_SCHEMA = 1
 PREFS_FILE = "prefs.json"
@@ -248,6 +257,40 @@ def parse_live_status(line: str) -> dict[str, Any] | None:
         "failures": counts[2],
         "calibrated": data["calibrated"],
     }
+
+
+def parse_calibration_result(line: str) -> dict[str, Any] | None:
+    """The ``calibration_result`` of a ``STATUS {"calibration_result": {...}}`` line, else ``None``.
+
+    ``request`` counts the ``calibrate`` words the live tool read on stdin (1, 2, ...);
+    ``null`` for a calibration from the N key or ``--calibrate-after``.
+    """
+
+    if not line.startswith(STATUS_PREFIX):
+        return None
+    try:
+        data = json.loads(line[len(STATUS_PREFIX):])
+    except ValueError:
+        return None
+    event = data.get("calibration_result") if isinstance(data, dict) else None
+    if not isinstance(event, dict):
+        return None
+    request, epoch = event.get("request"), event.get("epoch")
+    if request is not None and (isinstance(request, bool) or not isinstance(request, int)
+                                or request < 1):
+        return None
+    if epoch is not None and (isinstance(epoch, bool) or not isinstance(epoch, int)):
+        return None
+    if not isinstance(event.get("ok"), bool):
+        return None
+    texts = {}
+    for name in ("warning", "reason"):
+        value = event.get(name)
+        if value is not None and not isinstance(value, str):
+            return None
+        texts[name] = strip_ansi(value)[:300] if value else None
+    return {"request": request, "ok": event["ok"], "epoch": epoch,
+            "epoch_changed": event.get("epoch_changed") is True, **texts}
 
 
 def default_prefs() -> dict[str, Any]:
@@ -660,6 +703,9 @@ class _Job:
     live_status: dict[str, Any] | None = None
     #: A live job's stdin (``--control-stdin``); written under ``lock``.
     control: Any = None
+    #: ``calibrate`` words written to ``control``; the live tool numbers its results the same way.
+    calibrate_sent: int = 0
+    calibrations: deque = field(default_factory=lambda: deque(maxlen=MAX_CALIBRATION_RESULTS))
     lock: threading.Lock = field(default_factory=threading.Lock)
 
     def append(self, text: str) -> None:
@@ -668,10 +714,13 @@ class _Job:
             segments = [segment for segment in raw.split("\r") if segment.strip()]
             line = strip_ansi(segments[-1] if segments else "").rstrip()
             status = parse_live_status(line) if self.kind == "live" else None
+            result = parse_calibration_result(line) if self.kind == "live" else None
             with self.lock:
                 if status is not None:
                     # Machine status goes to the log file only, not the visible log.
                     self.live_status = status
+                elif result is not None:
+                    self.calibrations.append(result)
                 else:
                     self.lines.append(line)
                     self.total_lines += 1
@@ -695,6 +744,9 @@ class _Job:
             "summary": self.summary,
             "outputs": [path.name for path in self.outputs],
             "live": dict(self.live_status) if self.live_status is not None else None,
+            "calibration": {"sent": self.calibrate_sent,
+                            "results": [dict(item) for item in self.calibrations]}
+            if self.kind == "live" else None,
         }
 
     def summary_dict(self) -> dict[str, Any]:
@@ -811,6 +863,9 @@ class SetupWorkbench:
         self._memory_prefs = default_prefs()
         if stream_monitor is None and self.app_mode:
             stream_monitor = StreamMonitor()
+        elif stream_monitor is None and not self.windows:
+            # Ubuntu console: listen only while the stream or live step is open (C1 sender helper).
+            stream_monitor = StreamMonitor(idle_s=STREAM_IDLE_S)
         self._monitor = stream_monitor
         self._monitor_started = False
         self._firewall_state = firewall_state
@@ -822,6 +877,7 @@ class SetupWorkbench:
         #: ``${XDG_STATE_HOME:-~/.local/state}/mocap-g1``: console log, K1 lock and K1 log.
         self.user_state_dir = (Path(user_state_dir) if user_state_dir is not None
                                else default_user_state_dir(self.home))
+        self._commit: str | None = None  # the update tool refuses while the console runs
         # One password prompt at a time (firewall or Tk).
         self._privileged_lock = threading.Lock()
 
@@ -1311,9 +1367,41 @@ class SetupWorkbench:
             "files": self.files(session),
             "jobs": self.list_jobs(),
             "app": {"mode": APP_MODE, "version": self.app_version()} if self.app_mode else None,
-            "stream": self.stream_snapshot() if self._monitor is not None else None,
+            # An on-demand monitor is read through GET /setup/stream only, so this poll keeps it idle.
+            "stream": self.stream_snapshot()
+            if self._monitor is not None and getattr(self._monitor, "idle_s", None) is None else None,
             "prefs": self.prefs(),
+            "software": self.software() if not self.windows and not self.app_mode else None,
         }
+
+    def software(self) -> dict[str, Any]:
+        """The checkout's commit and the last "Mocap Update" result (``update-last.txt``)."""
+
+        if self._commit is None:
+            try:
+                done = subprocess.run(["git", "-C", str(self.repo_root), "log", "-1",
+                                       "--format=%h %cs"], capture_output=True, text=True,
+                                      timeout=5, check=False)
+                self._commit = done.stdout.strip() if done.returncode == 0 else ""
+            except (OSError, subprocess.SubprocessError):
+                self._commit = ""
+            if not self._commit:
+                self._commit = (self.archive_revision() or "")[:9]
+        try:
+            raw = (self.user_state_dir / UPDATE_LAST_NAME).read_text(encoding="utf-8",
+                                                                     errors="replace")
+        except OSError:
+            raw = None  # never updated with Mocap Update
+        last = None
+        if raw is not None:
+            lines = [strip_ansi(line).strip() for line in raw.splitlines()[:20]]
+            words = lines[0].split() if lines else []
+            last = {
+                "line": lines[0][:200] if lines else "",
+                "result": words[1] if len(words) > 1 and words[1] in ("PASS", "FAIL") else None,
+                "details": [line[:200] for line in lines[1:] if line],
+            }
+        return {"commit": self._commit or None, "update_last": last}
 
     # ------------------------------------------------------- stream monitor
 
@@ -1525,6 +1613,8 @@ class SetupWorkbench:
             live = {"calibrate_after_s": calibrate, "record_video": flag("record_video")}
             if flag("robot_stream"):  # K1 only, checked against the session in start_job
                 live["robot_stream"] = True
+                # The real K1 never calibrates without the operator's click (plan C2).
+                live["calibrate_after_s"] = None
             return live
         # Outputs are always overwritten; an ``overwrite`` option is accepted and ignored.
         if kind == "retarget":
@@ -1717,7 +1807,10 @@ class SetupWorkbench:
                     code="job_not_controllable",
                     job_id=job.id,
                 ) from exc
-        return {"accepted": True}
+            if command != "calibrate":
+                return {"accepted": True}
+            job.calibrate_sent += 1
+            return {"accepted": True, "request": job.calibrate_sent}
 
     @staticmethod
     def _label(kind: str, options: Mapping[str, Any]) -> str:

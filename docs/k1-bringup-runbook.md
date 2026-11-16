@@ -11,7 +11,8 @@ releases the arms when something looks wrong.
 
 **The easiest way to run the steps is the test window** (a GUI with buttons; see
 [The test window](#the-test-window)). It runs the same script, so everything in this guide
-applies to it.
+applies to it. For a live session with the suit, follow
+[Live suit to the real K1 in the UI](#live-suit-to-the-real-k1-in-the-ui).
 
 ## Stop rules (read first)
 
@@ -111,6 +112,78 @@ send to the developers" below).
 
 In the commands below, `T=".venv/bin/python tools/control/k1_commission.py"` and
 `S=<the session folder that probe printed>`.
+
+## Live suit to the real K1 in the UI
+
+One page for a live session: the performer in the Xsens suit moves the real K1's arms and head.
+Everything here is a button in the **Setup console** (menu: **Mocap Setup**) or the **K1 test
+window**; no terminal is needed. People: the performer, an operator at the PC, and one person at
+the robot with the remote (**LT+BACK = damping, the real stop**). Keep the robot held or on the
+hoist.
+
+1. **Software.** Setup console, step **03 · Session**, box **Software**: **Running version**
+   (commit and date of this checkout) and **Last update** (the result line of the last
+   **Mocap Update**: time, PASS or FAIL, old commit -> new commit). A failed update is shown in
+   red with what to do. To update, see step 11 below.
+2. **Session.** Step 03: robot **Booster K1**, the performer's height, **Windows Xsens IP** = the
+   address of the PC that runs Xsens (MVN). **Save session**.
+3. **Where the Xsens data comes from.** Start streaming in Xsens to this PC, port 5555. Steps
+   **06** and **07** show one line about the sender:
+   - green: data arrives from the address in the session. Good.
+   - red, "arrives from A, but the session expects B": click **Use A**. It saves A as the Xsens
+     source IP of the session. A live simulation that is already running keeps the old address:
+     stop it and start it again. **Use** only changes the session; it does not fix network
+     routing or a firewall.
+   - red, "comes from 2 senders": two PCs stream to this PC. Stop the stream on all but one.
+     There is no **Use** button then.
+   - "No Xsens data" or "No new Xsens data for N s": Xsens does not stream to this PC (wrong
+     destination address, cable, firewall: step 05 of the setup guide).
+   - "Another program uses UDP port 5555": a live tool or stream check started in a terminal
+     holds the port. The console listens on the port only while step 06 or 07 is open, and lets
+     go of it 10 s after you leave those steps.
+4. **Live simulation.** Step 07: tick **Send the arms to the K1 window**, click **Start live
+   simulation**. With the arms ticked there is no **Auto-calibrate**: the K1 is only calibrated by
+   your click. The lamps under the buttons show **Calibrated** and **Tracking on** (with the reason
+   when it is off).
+5. **Calibrate.** Click **Calibrate**. The console first shows what to tell the performer:
+   stand up straight, arms down at the sides, look straight ahead, hold still. Say it, then click
+   **Calibrate now** (or **Cancel**). The line under the buttons shows **Calibrating...**, then:
+   - **Calibrated.** Good.
+   - **Calibrated, but ...**: the calibration was taken, with a warning or a partial failure (for
+     example "the performer is not standing (thigh 62° from vertical)"). Read it; usually: have the
+     performer stand up, then Calibrate again. The pose check warns and never refuses.
+   - **Calibration failed: ...**: the earlier calibration stays. Fix the cause, Calibrate again.
+   - **No answer from the live simulation** (after 5 s): look at the **Calibrated** lamp, then
+     Calibrate again if needed. A live tool older than this console does not report results.
+   The K1 head takes its zero at Calibrate: a turned head gives a constant head offset for the
+   whole run. A new Calibrate during a run stops the arms (a normal stop); click Check and Go
+   again.
+6. **K1 window.** Step 13: **Open K1 test window**. It opens on **Quick start**. Set
+   **Transport** `booster` and **PC interface or IP** (the window remembers both), type your
+   name. Tick or untick **Head follows**.
+7. **Check and Go.** **Check robot and stream**: numbered lines, each with a lamp and, when red,
+   what to do. The check repeats every 2 s (read-only) until all are green. **Go** (the warnings
+   beside it do not block). The arms first move slowly to the performer's pose; the performer
+   holds still until the status says following. One large line shows the phase, the seconds
+   followed, head on or off (and why it is off) and lag holds.
+8. **Stop and release.** **STOP** in the window (or the time limit) slows the arms, gives them back
+   to Booster and turns the head back to straight. The remote's LT+BACK always works. At the end
+   the window shows PASS, or the stop reason with what to do next.
+9. **Recordings and their limits.** See [Recordings of a run](#recordings-of-a-run) for what is
+   recorded on each live run (the incoming suit data and the robot's joint data), where it is,
+   and what can be lost.
+10. **Export.** In the K1 window, **Zip session for the developers** packs the session folder into
+    one zip next to it and opens that folder. Send that file.
+11. **Update.** Close the K1 test window and stop the Setup console (below), then open **Mocap
+    Update** from the applications menu. It runs in a terminal: it refuses to start while the
+    console, a live simulation or the K1 window runs (and names what to close), pulls the new
+    release, runs the installer (type your password when asked), prints PASS or which step failed
+    with the command to run again, and offers to open the Setup console. The result is the
+    **Last update** line in step 03.
+12. **Stopping the console for real.** Closing the browser tab does not stop it. Click **Shut down
+    the console** in step 11 · Finish (a running job stops first; an open K1 window stays open),
+    or right-click **Mocap Setup** in the menu and choose **Stop the Setup console**. From a
+    terminal: `bash tools/setup/open_console.sh --stop`.
 
 ## The test window
 

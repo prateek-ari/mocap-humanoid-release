@@ -18,6 +18,7 @@ import {
   type PrivilegedOutcome,
   type SessionValues,
   type SetupState,
+  type StreamSnapshot,
 } from './setupApi'
 import { makeStatus, makeWindowsSetupPayload } from './test/fixtures'
 import type { BootstrapData, OperatorConfig, OperatorEvent, OperatorStatus, QualificationRun } from './types'
@@ -119,12 +120,21 @@ class FakeSetupClient extends SetupClient {
   readonly k1Opens = vi.fn<() => Promise<ActionResult<K1OpenOutcome>>>(() => Promise.resolve({ outcome: 'opened', message: 'The K1 test window is open on this desktop.' }))
   readonly admins = vi.fn<(action: string) => Promise<ActionResult<PrivilegedOutcome>>>(() => Promise.resolve({ outcome: 'done', message: 'Firewall rule added.' }))
   readonly shutdowns = vi.fn(() => Promise.resolve())
-  readonly controls = vi.fn<(id: string, command: string) => Promise<void>>(() => Promise.resolve())
+  readonly controls = vi.fn<(id: string, command: string) => Promise<number | null>>(() => Promise.resolve(1))
+  readonly streams = vi.fn((): Promise<StreamSnapshot> => Promise.resolve(stream({ state: 'none' })))
+  override getStream() { return this.streams() }
   override getK1() { return this.k1Reads() }
   override controlJob(id: string, command: 'calibrate' | 'toggle_tracking' | 'rearm') { return this.controls(id, command) }
   override openK1() { return this.k1Opens() }
   override runPrivileged(action: 'firewall' | 'install_tk') { return this.admins(action) }
   override shutdown() { return this.shutdowns() }
+}
+
+function stream(overrides: Partial<StreamSnapshot> = {}): StreamSnapshot {
+  return {
+    state: 'receiving', bind: '0.0.0.0', port: 5555, source: null, senders: [], rate_hz: 60, loss_fraction: 0,
+    body_frames: 0, joint_angles: true, last_packet_age_s: null, malformed: 0, ...overrides,
+  }
 }
 
 function k1Status(overrides: Partial<K1Status> = {}): K1Status {
@@ -790,11 +800,12 @@ describe('Setup desktop tools (Linux checkout console)', () => {
     render(<App client={new FakeClient()} setupClient={setupClient} />)
     await flush()
     await flush()
-    expect(screen.getByText(/the K1 head takes its zero here/)).toBeTruthy()
+    expect(screen.getByText(/The K1 head takes its zero at Calibrate/)).toBeTruthy()
     const flags = document.querySelector('.live-tracking')?.textContent
     expect(flags).toContain('Calibrated no')
     expect(flags).toContain('Tracking on no')
     fireEvent.click(screen.getByRole('button', { name: /^Calibrate/ }))
+    fireEvent.click(screen.getByRole('button', { name: 'Calibrate now' }))
     await flush()
     expect(setupClient.controls).toHaveBeenCalledWith(liveJob.id, 'calibrate')
     setupClient.controls.mockRejectedValueOnce(new SetupApiError('The live simulation is no longer reading commands', 409, 'job_not_controllable'))
@@ -834,5 +845,165 @@ describe('Setup desktop tools (Linux checkout console)', () => {
     await flush()
     expect(setupClient.shutdowns).toHaveBeenCalledTimes(1)
     expect(screen.getByText(/The console is shutting down/)).toBeTruthy()
+  })
+})
+
+describe('Live K1 helpers (plan C1, C2, C3)', () => {
+  const desktop = (overrides: Partial<SetupState> = {}) => makeSetup({ session: values, desktop_tools: true, firewall_state: 'active', ...overrides })
+  const k1Session = { ...values, robot: 'booster_k1' as const }
+  const liveStatus = { enabled: true, reason: '', fps: 60, frames: 120, drops: 0, failures: 0, calibrated: true }
+
+  async function openLive(job: JobSummary, setup = desktop({ session: k1Session, jobs: [job] })) {
+    const setupClient = new FakeSetupClient(setup)
+    setupClient.polls.mockResolvedValue({ job, lines: [], next: 0 })
+    window.history.replaceState(null, '', '#setup/live')
+    render(<App client={new FakeClient()} setupClient={setupClient} />)
+    await flush()
+    await flush()
+    return setupClient
+  }
+
+  async function calibrateAndAnswer(results: NonNullable<JobSummary['calibration']>['results'], jobOverrides: Partial<JobSummary> = {}) {
+    const liveJob: JobSummary = { ...runningJob, kind: 'live', label: 'Live simulation', live: liveStatus, calibration: { sent: 0, results: [] } }
+    const setupClient = await openLive(liveJob)
+    setupClient.controls.mockResolvedValue(2)
+    fireEvent.click(screen.getByRole('button', { name: /^Calibrate/ }))
+    fireEvent.click(screen.getByRole('button', { name: 'Calibrate now' }))
+    await flush()
+    expect(screen.getByRole('status', { name: 'Calibration result' }).textContent).toBe('Calibrating…')
+    setupClient.polls.mockResolvedValue({ job: { ...liveJob, calibration: { sent: 2, results }, ...jobOverrides }, lines: [], next: 0 })
+    await act(() => vi.advanceTimersByTimeAsync(JOB_POLL_MS))
+    await flush()
+    return screen.queryByRole('status', { name: 'Calibration result' })?.textContent ?? null
+  }
+
+  const result = (request: number | null, overrides = {}) => ({ request, ok: true, epoch: 2, epoch_changed: true, warning: null, reason: null, ...overrides })
+
+  it('shows the performer steps first and sends nothing on Cancel', async () => {
+    const liveJob: JobSummary = { ...runningJob, kind: 'live', label: 'Live simulation', live: liveStatus }
+    const setupClient = await openLive(liveJob)
+    fireEvent.click(screen.getByRole('button', { name: /^Calibrate/ }))
+    const ask = screen.getByRole('alertdialog', { name: 'Calibrate now?' })
+    expect(ask.textContent).toContain('Stand up straight.')
+    expect(ask.textContent).toContain('Arms down at the sides.')
+    expect(ask.textContent).toContain('Look straight ahead.')
+    expect(ask.textContent).toContain('Hold still')
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+    await flush()
+    expect(setupClient.controls).not.toHaveBeenCalled()
+    expect(screen.queryByRole('alertdialog', { name: 'Calibrate now?' })).toBeNull()
+  })
+
+  it('shows Calibrated for its own request only', async () => {
+    expect(await calibrateAndAnswer([result(1, { ok: false, reason: 'old' }), result(2)])).toBe('Calibrated.')
+  })
+
+  it('shows the pose warning with the result', async () => {
+    const text = await calibrateAndAnswer([result(2, { warning: 'the performer is not standing (thigh 80° from vertical).' })])
+    expect(text).toBe('Calibrated, but the performer is not standing (thigh 80° from vertical).')
+  })
+
+  it('shows a partial and a full failure', async () => {
+    expect(await calibrateAndAnswer([result(2, { ok: false, reason: 'floor calibration failed: no feet' })]))
+      .toBe('Calibrated, but floor calibration failed: no feet')
+    cleanup()
+    expect(await calibrateAndAnswer([result(2, { ok: false, epoch_changed: false, reason: 'no frame yet' })]))
+      .toBe('Calibration failed: no frame yet. The earlier calibration stays. Calibrate again.')
+  })
+
+  it('says when the job ended before it answered', async () => {
+    const text = await calibrateAndAnswer([], { state: 'stopped', finished_at: NOW_MS / 1000 + 1 })
+    expect(text).toBe('The live simulation stopped before it answered the Calibrate.')
+  })
+
+  it('ignores a result from another job and says No answer after 5 s', async () => {
+    const liveJob: JobSummary = { ...runningJob, kind: 'live', label: 'Live simulation', live: liveStatus, calibration: { sent: 0, results: [] } }
+    const setupClient = await openLive(liveJob)
+    setupClient.controls.mockResolvedValue(1)
+    fireEvent.click(screen.getByRole('button', { name: /^Calibrate/ }))
+    fireEvent.click(screen.getByRole('button', { name: 'Calibrate now' }))
+    await flush()
+    // Same request number, other job: a new live job replaced the one we asked.
+    const other: JobSummary = { ...liveJob, id: 'j-20261013-101600-2', calibration: { sent: 1, results: [result(1)] } }
+    setupClient.polls.mockResolvedValue({ job: { ...liveJob, calibration: { sent: 1, results: [] } }, lines: [], next: 0 })
+    setupClient.state = desktop({ session: k1Session, jobs: [liveJob, other] })
+    await act(() => vi.advanceTimersByTimeAsync(5000))
+    await flush()
+    expect(screen.getByRole('status', { name: 'Calibration result' }).textContent).toContain('No answer from the live simulation')
+    // A late answer still shows.
+    setupClient.polls.mockResolvedValue({ job: { ...liveJob, calibration: { sent: 1, results: [result(1)] } }, lines: [], next: 0 })
+    await act(() => vi.advanceTimersByTimeAsync(JOB_POLL_MS))
+    await flush()
+    expect(screen.getByRole('status', { name: 'Calibration result' }).textContent).toBe('Calibrated.')
+  })
+
+  it('never offers auto-calibration for the K1 arm stream', async () => {
+    const setupClient = new FakeSetupClient(desktop({ session: k1Session }))
+    window.history.replaceState(null, '', '#setup/live')
+    render(<App client={new FakeClient()} setupClient={setupClient} />)
+    await flush()
+    await flush()
+    expect(screen.queryByRole('checkbox', { name: /Auto-calibrate after/ })).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: 'Start live simulation' }))
+    await flush()
+    expect(setupClient.starts).toHaveBeenLastCalledWith('live', { calibrate_after_s: null, record_video: false, robot_stream: true })
+  })
+
+  async function openStream(snapshot: StreamSnapshot) {
+    const setupClient = new FakeSetupClient(desktop())
+    setupClient.streams.mockResolvedValue(snapshot)
+    window.history.replaceState(null, '', '#setup/stream')
+    render(<App client={new FakeClient()} setupClient={setupClient} />)
+    await flush()
+    await flush()
+    return setupClient
+  }
+
+  const senderText = () => screen.getByRole('status', { name: 'Xsens sender' }).textContent
+
+  it('offers Use <address> for data from another sender and saves it', async () => {
+    const setupClient = await openStream(stream({ senders: ['192.168.88.11'], source: '192.168.88.11:50000', body_frames: 300 }))
+    expect(senderText()).toContain('arrives from 192.168.88.11, but the session expects 192.168.1.246')
+    fireEvent.click(screen.getByRole('button', { name: 'Use 192.168.88.11' }))
+    await flush()
+    expect(setupClient.saves).toHaveBeenCalledWith({ ...values, windows_xsens_ip: '192.168.88.11' }, false)
+    expect(senderText()).toContain('stop it and start it again')
+    expect(senderText()).toContain('does not fix network routing or a firewall')
+  })
+
+  it('shows the configured sender, two senders, stale and no data without a button', async () => {
+    await openStream(stream({ senders: ['192.168.1.246'], body_frames: 300 }))
+    expect(senderText()).toContain('arrives from 192.168.1.246, the source in this session')
+    expect(screen.queryByRole('button', { name: /^Use / })).toBeNull()
+    cleanup()
+    await openStream(stream({ senders: ['192.168.1.246', '192.168.88.11'], body_frames: 300 }))
+    expect(senderText()).toContain('2 senders: 192.168.1.246, 192.168.88.11')
+    expect(screen.queryByRole('button', { name: /^Use / })).toBeNull()
+    cleanup()
+    await openStream(stream({ state: 'stale', senders: [], body_frames: 300, last_packet_age_s: 7.2, source: '192.168.88.11:50000' }))
+    expect(senderText()).toContain('No new Xsens data for 7 s (last from 192.168.88.11)')
+    expect(screen.queryByRole('button', { name: /^Use / })).toBeNull()
+    cleanup()
+    await openStream(stream({ state: 'none' }))
+    expect(senderText()).toContain('No Xsens data on UDP port 5555')
+    cleanup()
+    await openStream(stream({ state: 'port_busy' }))
+    expect(senderText()).toContain('Another program uses UDP port 5555')
+  })
+
+  it('shows the running version and the last update in step 03', async () => {
+    const software = { commit: 'e3962ae 2026-11-16', update_last: { line: '2026-11-16T09:00:00+01:00 FAIL e3962ae -> e3962ae', result: 'FAIL' as const, details: ['git pull failed: run Mocap Update again.'] } }
+    await renderApp(desktop({ software }))
+    window.history.replaceState(null, '', '#setup/session')
+    act(() => { window.dispatchEvent(new HashChangeEvent('hashchange')) })
+    const group = screen.getByRole('group', { name: 'Software' })
+    expect(group.textContent).toContain('e3962ae 2026-11-16')
+    expect(group.textContent).toContain('2026-11-16T09:00:00+01:00 FAIL e3962ae -> e3962ae')
+    expect(group.textContent).toContain('The last update failed. git pull failed: run Mocap Update again.')
+    expect(group.textContent).toContain('To update: stop the console')
+    expect(group.textContent).toContain('Mocap Update')
+    cleanup()
+    await renderApp(desktop({ software: { commit: 'e3962ae 2026-11-16', update_last: null } }))
+    expect(screen.getByRole('group', { name: 'Software' }).textContent).toContain('Mocap Update has not run on this PC')
   })
 })

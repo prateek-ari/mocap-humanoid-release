@@ -87,7 +87,7 @@ class FakeSetupClient extends SetupClient {
   readonly polls = vi.fn<(id: string, after: number) => Promise<JobLog>>((id, after) => Promise.resolve({ job: liveJob({ id }), lines: [], next: after }))
   readonly stops = vi.fn<(id: string) => Promise<JobSummary>>((id) => Promise.resolve(liveJob({ id })))
   readonly prefsWrites = vi.fn<(changes: Partial<Prefs>) => Promise<Prefs>>((changes) => Promise.resolve({ ...this.state.prefs, ...changes }))
-  readonly controls = vi.fn<(id: string, command: ControlCommand) => Promise<void>>(() => Promise.resolve())
+  readonly controls = vi.fn<(id: string, command: ControlCommand) => Promise<number | null>>(() => Promise.resolve(null))
 
   constructor(state: SetupState) {
     super()
