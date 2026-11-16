@@ -247,9 +247,11 @@ class XsensStreamAcceptance:
         if self.malformed_datagrams:
             failures.append(f"received {self.malformed_datagrams} malformed expected datagrams")
         if self.bad_quaternion_norms:
-            failures.append(
+            # A warning, not a failure (owner, 2026-11-16): MVN sent 2 quaternions of norm 0.90 in
+            # 165,600 over Wi-Fi with no loss; the live tool normalises every quaternion.
+            warnings.append(
                 f"found {self.bad_quaternion_norms} body quaternions outside the "
-                f"±{self.quaternion_norm_tolerance:g} norm tolerance"
+                f"±{self.quaternion_norm_tolerance:g} norm tolerance (the live tool normalises them)"
             )
         if unit_assessment != "metres_plausible":
             failures.append(f"translation-unit check returned {unit_assessment}")
