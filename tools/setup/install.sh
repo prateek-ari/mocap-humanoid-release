@@ -230,10 +230,17 @@ if (( dry_run )); then
 else
   [[ -n ${XDG_STATE_HOME:-}${HOME:-} ]] || die "HOME is not set"
   mkdir -p -- "${k1_lock%/*}"
-  exec {k1_lock_fd}>>"$k1_lock"
-  if ! flock -n "$k1_lock_fd"; then
-    printf 'Close the K1 test window first (or wait for the other install to finish): %s is held.\n' "$k1_lock" >&2
-    exit 2
+  # Mocap Update (update.sh) holds this lock and names its open descriptor. Use that only when
+  # it is this lock file and flock grants it: only the owner's inherited open file can.
+  if [[ ${MOCAP_K1_LOCK_FD:-} =~ ^[0-9]+$ && /proc/self/fd/${MOCAP_K1_LOCK_FD} -ef $k1_lock ]] &&
+      flock -n "$MOCAP_K1_LOCK_FD"; then
+    k1_lock_fd=$MOCAP_K1_LOCK_FD
+  else
+    exec {k1_lock_fd}>>"$k1_lock"
+    if ! flock -n "$k1_lock_fd"; then
+      printf 'Close the K1 test window first (or wait for the other install to finish): %s is held.\n' "$k1_lock" >&2
+      exit 2
+    fi
   fi
 fi
 

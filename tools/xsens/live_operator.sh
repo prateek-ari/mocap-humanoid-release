@@ -15,6 +15,20 @@ source_ip=${XSENS_SOURCE_IP:-}
 duration=${XSENS_DURATION_S:-30}
 ros_image=${XSENS_ROS_IMAGE:-xsens-ros2:jazzy}
 
+# Every stage holds update.lock shared while it runs (exec keeps the descriptor), so it cannot
+# start during Mocap Update (tools/setup/update.sh) and the update cannot start meanwhile.
+case $action in
+  acceptance|ros2|gmr)
+    update_lock=${XDG_STATE_HOME:-~/.local/state}/mocap-g1/update.lock  # ~ works without HOME
+    mkdir -p -- "${update_lock%/*}"
+    exec {update_fd}>>"$update_lock"
+    if ! flock -s -n "$update_fd"; then
+      echo "An update is running. Wait until Mocap Update has finished." >&2
+      exit 2
+    fi
+    ;;
+esac
+
 require_source_ip() {
   require_xsens_source_ip "$source_ip"
 }

@@ -9,7 +9,7 @@ Usage: bash tools/setup/open_console.sh [--install-shortcut | --stop] [--no-brow
   (no option)         Start the Setup console if it is not running, then open it
   --install-shortcut  Add a "Mocap Setup" launcher to the applications menu (right-click
                       it for "Stop the Setup console"), and "K1 Hardware Tests" when the
-                      K1 test tools are installed
+                      K1 test tools are installed, and "Mocap Update"
   --stop              Stop a Setup console started by this script
   --no-browser        Start it without opening a browser
 
@@ -135,6 +135,16 @@ case $action in
       rm -f -- "$k1_entry"
       printf 'K1 test tools not installed: no "K1 Hardware Tests" menu entry.\n'
     fi
+    update_entry=$applications/mocap-update.desktop
+    {
+      printf '[Desktop Entry]\nType=Application\nVersion=1.0\nName=Mocap Update\n'
+      printf 'Comment=Download and install the newest version (stop the Setup console first)\n'
+      printf 'Exec=bash %s\n' "$(quote "$script_dir/update.sh")"
+      printf 'Icon=system-software-update\nTerminal=true\nStartupNotify=true\n'
+      printf 'Categories=Utility;Engineering;\n'
+    } > "$update_entry.tmp"
+    mv -- "$update_entry.tmp" "$update_entry"
+    printf 'Added "Mocap Update" to the applications menu (%s).\n' "$update_entry"
     exit 0 ;;
   stop)
     if stop_console; then
@@ -149,6 +159,11 @@ case $action in
 esac
 
 [[ -x $venv_python ]] || die "project environment missing; run: bash tools/setup/install.sh"
+# The console backend holds update.lock shared while it runs (it inherits this descriptor), so
+# Mocap Update cannot run meanwhile and the console cannot start during an update.
+mkdir -p -- "$state_dir"
+exec {update_fd}>>"$state_dir/update.lock"
+flock -s -n "$update_fd" || die 'An update is running. Wait until Mocap Update has finished.'
 case $(probe) in
   '200 nodisplay')
     # Started without a desktop (for example over SSH). Restart it from this
@@ -163,6 +178,7 @@ case $(probe) in
   *) die "port $port is used by another program; stop it or set MOCAP_SETUP_PORT" ;;
 esac
 
+exec {update_fd}>&-  # only the backend keeps it, never the browser
 printf 'Setup console: %s\n' "$url"
 if (( browser )); then
   xdg-open "$url" >/dev/null 2>&1 || printf 'Open %s in your browser.\n' "$url"

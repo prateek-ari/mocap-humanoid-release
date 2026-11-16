@@ -827,18 +827,26 @@ def lock_path() -> Path:
 
 
 def take_instance_lock(path: Path | None = None) -> Any:
-    """The open lock file while this window runs, or None when the window is already open or
-    tools/setup/install.sh is running (it holds the same lock while it changes .venv)."""
+    """The open lock file while this window runs, or None when the window is already open,
+    tools/setup/install.sh is running (it holds the same lock while it changes .venv) or Mocap
+    Update runs (tools/setup/update.sh holds update.lock exclusive; the window holds it shared,
+    then its own lock: always that order)."""
     import fcntl
 
     path = path or lock_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    handle = path.open("a")
+    update = (path.parent / "update.lock").open("a")
+    handle = None
     try:
+        fcntl.flock(update, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        handle = path.open("a")
         fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
-        handle.close()
+        if handle is not None:
+            handle.close()
+        update.close()
         return None
+    handle.update_lock = update  # held with the window's own lock
     return handle
 
 

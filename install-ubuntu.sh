@@ -15,8 +15,8 @@ Checks this Ubuntu 22.04/24.04 PC and installs only what is missing:
   5. This project: tools/setup/install.sh live (Python environment, live image)
   6. Optional (it asks; default yes): the recorded route and the Booster K1 test
      tools (GMR runtime in ~/mocap-runtime, Booster SDK, Tk)
-Then it adds "Mocap Setup" (and "K1 Hardware Tests") to the applications menu
-and opens the Setup console.
+Then it adds "Mocap Setup", "Mocap Update" (and "K1 Hardware Tests") to the
+applications menu and opens the Setup console.
 
   --check       Only report what is installed or missing; change nothing
   --with-ros2   Also build the optional ROS 2 image
