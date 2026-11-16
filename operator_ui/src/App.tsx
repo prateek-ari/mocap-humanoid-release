@@ -380,7 +380,7 @@ export function App({ client = defaultClient, setupClient = defaultSetupClient }
         </div>
         <nav className="workspace-switch" aria-label="Workspace">
           {setupAvailable && (
-            <button className={workspace === 'setup' ? 'active' : ''} aria-current={workspace === 'setup' ? 'page' : undefined} onClick={() => selectWorkspace('setup')}>Setup</button>
+            <button className={workspace === 'setup' ? 'active' : ''} aria-current={workspace === 'setup' ? 'page' : undefined} onClick={() => selectWorkspace('setup')}>Demo</button>
           )}
           <button className={workspace === 'session' ? 'active' : ''} aria-current={workspace === 'session' ? 'page' : undefined} onClick={() => selectWorkspace('session')}>Session</button>
           <button className={workspace === 'engineering' ? 'active' : ''} aria-current={workspace === 'engineering' ? 'page' : undefined} onClick={() => selectWorkspace('engineering')}>Engineering</button>

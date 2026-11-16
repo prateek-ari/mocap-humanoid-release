@@ -1037,6 +1037,25 @@ def create_app(
         await read_json_object(request, label="Open request", allow_empty=True)
         return await asyncio.to_thread(workbench.open_k1_window)
 
+    @app.get("/api/v1/setup/k1/live")
+    async def get_setup_k1_live():
+        workbench = require_setup()
+        return await asyncio.to_thread(workbench.k1_live_status)
+
+    @app.post("/api/v1/setup/k1/live")
+    async def post_setup_k1_live(request: Request):
+        workbench = require_setup()
+        require_same_origin(request.headers.get("origin"))
+        body = await read_json_object(request, label="Robot request", allow_empty=False)
+        return await asyncio.to_thread(workbench.k1_live_start, body)
+
+    @app.post("/api/v1/setup/k1/live/stop")
+    async def post_setup_k1_live_stop(request: Request):
+        workbench = require_setup()
+        require_same_origin(request.headers.get("origin"))
+        await read_json_object(request, label="Stop request", allow_empty=True)
+        return await asyncio.to_thread(workbench.k1_live_stop)
+
     @app.post("/api/v1/setup/privileged")
     async def post_setup_privileged(request: Request):
         # Waits (in a worker thread) until the desktop password prompt is answered.

@@ -53,6 +53,7 @@ from ..live_robots import LIVE_ROBOTS
 from ._version import service_version
 from .core import OperatorError
 from .stream_monitor import StreamMonitor, off_snapshot
+from .k1_live import K1LiveRunner
 
 
 SESSION_KEYS = (
@@ -880,6 +881,8 @@ class SetupWorkbench:
         self._commit: str | None = None  # the update tool refuses while the console runs
         # One password prompt at a time (firewall or Tk).
         self._privileged_lock = threading.Lock()
+        #: Step 13's live robot panel (check, Go, STOP); logs beside the K1 window's.
+        self.k1_live = K1LiveRunner(self.repo_root, self.k1_log_path.parent)
 
     # ------------------------------------------------------------------ paths
 
@@ -2554,6 +2557,39 @@ class SetupWorkbench:
                 "message": f"The K1 test window closed at once (exit {code}). "
                            f"See {self._tilde(str(self.k1_log_path))}."}
 
+    def k1_live_status(self) -> dict[str, Any]:
+        """GET /api/v1/setup/k1/live: the robot check or run, and other DDS programs on this PC."""
+        self._require_desktop_tools()
+        return self.k1_live.status()
+
+    def k1_live_start(self, body: Mapping[str, Any]) -> dict[str, Any]:
+        """POST /api/v1/setup/k1/live: ``action`` check (read-only) or go (the arms move)."""
+        self._require_desktop_tools()
+        action = body.get("action")
+        head = body.get("head", True)
+        limit = body.get("time_limit_s", 120)
+        if not isinstance(head, bool):
+            raise _invalid("head must be true or false", "head")
+        if isinstance(limit, bool) or not isinstance(limit, int):
+            raise _invalid("time_limit_s must be a whole number of seconds", "time_limit_s")
+        model = Path(self._session_or_defaults()["mocap_ws"]).joinpath(*K1_MODEL)
+        if not model.is_file():
+            raise SetupError("The K1 model is missing: install the K1 test tools in this step first.",
+                             code="k1_not_installed")
+        try:
+            return self.k1_live.start(str(action), net=str(body.get("net") or "192.168.10.10"),
+                                      operator=str(body.get("operator") or ""), head=head,
+                                      time_limit_s=limit, model=model)
+        except ValueError as exc:
+            raise _invalid(str(exc), "action") from exc
+        except RuntimeError as exc:
+            raise SetupError(str(exc), code="k1_busy", status_code=409) from exc
+
+    def k1_live_stop(self) -> dict[str, Any]:
+        """POST /api/v1/setup/k1/live/stop: STOP (the bridge slows the arms and hands them back)."""
+        self._require_desktop_tools()
+        return self.k1_live.stop()
+
     def privileged_argv(self, action: str) -> list[str]:
         """The fixed pkexec argv for ``action``; IPs come from the saved session, validated."""
 
@@ -2632,6 +2668,7 @@ class SetupWorkbench:
     def shutdown(self) -> None:
         """Stop any running job and the stream monitor; called on console shutdown."""
 
+        self.k1_live.shutdown()  # first: a running robot run stops and releases the arms
         job = self.running_job()
         if job is not None:
             self.stop_job(job.id, wait=True)

@@ -44,6 +44,36 @@ export interface K1Status {
 }
 
 export type K1OpenOutcome = 'opened' | 'already_open' | 'failed'
+
+/** Step 13's live robot panel: ``GET /api/v1/setup/k1/live``. */
+export type K1LiveAction = 'check' | 'go'
+export type K1LiveOutcome = 'ready' | 'passed' | 'stopped' | 'refused' | 'failed'
+export interface K1LiveCheck { key: string; ok: boolean | null; text: string }
+export interface K1LiveRun {
+  action: K1LiveAction
+  running: boolean
+  started_at: number
+  finished_at: number | null
+  settings: { net: string; operator: string; head: boolean; time_limit_s: number }
+  checks: K1LiveCheck[]
+  /** The bridge's last status line: ``state`` (waiting, aligning, following, hold, realign, stopping, …), ``following_s``, ``time_limit_s``, ``head``, ``lag_holds``. */
+  live: Record<string, unknown> | null
+  result: { outcome: K1LiveOutcome; reason: string | null } | null
+  stop_requested: boolean
+  robot_data: { folder: string | null; state: string } | null
+  session: string | null
+  lines: string[]
+  log: string
+}
+export interface K1LiveStatus {
+  /** Other programs on the ROS 2 ports (7400-7499) of this PC: they can crash the robot's software. */
+  other_dds: { name: string; pid: number }[]
+  run: K1LiveRun | null
+  limits_s: number[]
+  /** The practice robot, not the real K1 (``bash k1-demo.sh --practice``). */
+  practice: boolean
+}
+export interface K1LiveRequest { action: K1LiveAction; net: string; operator: string; head: boolean; time_limit_s: number }
 /** done (exit 0), cancelled (prompt dismissed) or unavailable (no prompt, or the command failed). */
 export type PrivilegedOutcome = 'done' | 'cancelled' | 'unavailable'
 
@@ -499,6 +529,42 @@ export function parseSetupState(value: unknown): SetupState {
   }
 }
 
+const K1_OUTCOME_SET: ReadonlySet<string> = new Set<K1LiveOutcome>(['ready', 'passed', 'stopped', 'refused', 'failed'])
+
+/** Unknown fields read as "nothing running"; a malformed run is dropped. */
+export function parseK1Live(value: unknown): K1LiveStatus {
+  const record = isRecord(value) ? value : {}
+  const other = Array.isArray(record.other_dds) ? record.other_dds.filter(isRecord).map((item) => ({ name: str(item.name), pid: typeof item.pid === 'number' ? item.pid : 0 })) : []
+  const limits = Array.isArray(record.limits_s) ? record.limits_s.filter((item): item is number => typeof item === 'number') : [60, 120, 300, 600]
+  const raw = isRecord(record.run) ? record.run : null
+  let run: K1LiveRun | null = null
+  if (raw && (raw.action === 'check' || raw.action === 'go')) {
+    const settings = isRecord(raw.settings) ? raw.settings : {}
+    const result = isRecord(raw.result) && typeof raw.result.outcome === 'string' && K1_OUTCOME_SET.has(raw.result.outcome)
+      ? { outcome: raw.result.outcome as K1LiveOutcome, reason: typeof raw.result.reason === 'string' ? raw.result.reason : null }
+      : null
+    run = {
+      action: raw.action,
+      running: raw.running === true,
+      started_at: typeof raw.started_at === 'number' ? raw.started_at : 0,
+      finished_at: typeof raw.finished_at === 'number' ? raw.finished_at : null,
+      settings: {
+        net: str(settings.net), operator: str(settings.operator), head: settings.head !== false,
+        time_limit_s: typeof settings.time_limit_s === 'number' ? settings.time_limit_s : 120,
+      },
+      checks: Array.isArray(raw.checks) ? raw.checks.filter(isRecord).map((item) => ({ key: str(item.key), ok: typeof item.ok === 'boolean' ? item.ok : null, text: str(item.text) })) : [],
+      live: isRecord(raw.live) ? raw.live : null,
+      result,
+      stop_requested: raw.stop_requested === true,
+      robot_data: isRecord(raw.robot_data) ? { folder: typeof raw.robot_data.folder === 'string' ? raw.robot_data.folder : null, state: str(raw.robot_data.state) } : null,
+      session: typeof raw.session === 'string' ? raw.session : null,
+      lines: Array.isArray(raw.lines) ? raw.lines.filter((line): line is string => typeof line === 'string') : [],
+      log: str(raw.log),
+    }
+  }
+  return { other_dds: other, run, limits_s: limits.length ? limits : [60, 120, 300, 600], practice: record.practice === true }
+}
+
 /** Missing or malformed fields read as not installed / not open. */
 export function parseK1Status(value: unknown): K1Status {
   const record = isRecord(value) ? value : {}
@@ -670,6 +736,20 @@ export class SetupClient {
   async openK1(): Promise<ActionResult<K1OpenOutcome>> {
     const response = await setupRequest('/k1/open', { method: 'POST', body: '{}', timeoutMs: 15000 })
     return parseResult(await json(response), K1_OUTCOMES, 'failed')
+  }
+
+  async getK1Live(): Promise<K1LiveStatus> {
+    return parseK1Live(await json(await setupRequest('/k1/live', { timeoutMs: 15000 })))
+  }
+
+  /** Step 13: ``check`` (read-only) or ``go`` (the robot's arms and head follow). */
+  async startK1Live(request: K1LiveRequest): Promise<void> {
+    await json(await setupRequest('/k1/live', { method: 'POST', body: JSON.stringify(request), timeoutMs: 15000 }))
+  }
+
+  /** STOP: the arms slow down and are handed back; the head turns straight. */
+  async stopK1Live(): Promise<void> {
+    await json(await setupRequest('/k1/live/stop', { method: 'POST', body: '{}', timeoutMs: 15000 }))
   }
 
   /** One fixed admin command behind the desktop password prompt; resolves when it is answered. */

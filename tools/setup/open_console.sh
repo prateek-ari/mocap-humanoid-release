@@ -9,7 +9,7 @@ Usage: bash tools/setup/open_console.sh [--install-shortcut | --stop] [--no-brow
   (no option)         Start the Setup console if it is not running, then open it
   --install-shortcut  Add a "Mocap Setup" launcher to the applications menu (right-click
                       it for "Stop the Setup console"), and "K1 Hardware Tests" when the
-                      K1 test tools are installed, and "Mocap Update"
+                      K1 test tools are installed, "K1 Live Demo" and "Mocap Update"
   --stop              Stop a Setup console started by this script
   --no-browser        Start it without opening a browser
 
@@ -135,6 +135,16 @@ case $action in
       rm -f -- "$k1_entry"
       printf 'K1 test tools not installed: no "K1 Hardware Tests" menu entry.\n'
     fi
+    demo_entry=$applications/mocap-k1-demo.desktop
+    {
+      printf '[Desktop Entry]\nType=Application\nVersion=1.0\nName=K1 Live Demo\n'
+      printf 'Comment=The robot copies the performer: the Setup console on its live-demo page\n'
+      printf 'Exec=bash %s\n' "$(quote "$repo_root/k1-demo.sh")"
+      printf 'Icon=media-playback-start\nTerminal=false\nStartupNotify=true\n'
+      printf 'Categories=Utility;Engineering;\n'
+    } > "$demo_entry.tmp"
+    mv -- "$demo_entry.tmp" "$demo_entry"
+    printf 'Added "K1 Live Demo" to the applications menu (%s).\n' "$demo_entry"
     update_entry=$applications/mocap-update.desktop
     {
       printf '[Desktop Entry]\nType=Application\nVersion=1.0\nName=Mocap Update\n'

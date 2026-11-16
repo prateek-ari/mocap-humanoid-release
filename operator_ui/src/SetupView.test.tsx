@@ -187,7 +187,7 @@ describe('Setup workspace availability', () => {
   it('shows Setup first and opens it by default when available', async () => {
     await renderApp(makeSetup())
     const buttons = workspaceButtons()
-    expect(buttons.map((button) => button.textContent)).toEqual(['Setup', 'Session', 'Engineering'])
+    expect(buttons.map((button) => button.textContent)).toEqual(['Demo', 'Session', 'Engineering'])
     expect(buttons[0].getAttribute('aria-current')).toBe('page')
     expect(panel()?.getAttribute('data-step')).toBe('session')
     // Live route steps only; the action dock belongs to the Session workspace.
@@ -470,7 +470,7 @@ describe('Setup hash navigation', () => {
 
     window.history.replaceState(null, '', '#setup/windows')
     act(() => { window.dispatchEvent(new HashChangeEvent('hashchange')) })
-    expect(screen.getByRole('button', { name: 'Setup' }).getAttribute('aria-current')).toBe('page')
+    expect(screen.getByRole('button', { name: 'Demo' }).getAttribute('aria-current')).toBe('page')
     expect(panel()?.getAttribute('data-step')).toBe('windows')
     expect(screen.getByText('192.168.1.20', { selector: '.value-plate strong' })).toBeTruthy()
   })
@@ -501,7 +501,7 @@ describe('Setup on Linux without platform fields', () => {
   it('keeps the Linux wording, guide numbers and UFW block', async () => {
     window.history.replaceState(null, '', '#setup/session')
     await renderApp(makeSetup({ session: values }))
-    expect([...document.querySelectorAll('.step-number')].map((item) => item.textContent)).toEqual(['03', '04–05', '06', '07', '11'])
+    expect([...document.querySelectorAll('.step-number')].map((item) => item.textContent)).toEqual(['01', '02', '03', '04', '05'])
     expect(screen.getByLabelText('Windows Xsens IP')).toBeTruthy()
     expect(screen.getByLabelText('Linux Xsens IP')).toBeTruthy()
     expect(screen.queryByRole('radiogroup', { name: 'Xsens Humanoid runs on' })).toBeNull()
@@ -523,10 +523,10 @@ describe('Setup on Linux without platform fields', () => {
 describe('Setup on Windows', () => {
   it('uses plain step numbers instead of the Linux guide numbers', async () => {
     await renderApp(makeWindowsSetup({ session: windowsValues }))
-    expect([...document.querySelectorAll('.step-number')].map((item) => item.textContent)).toEqual(['1', '2', '3', '4', '5'])
+    expect([...document.querySelectorAll('.step-number')].map((item) => item.textContent)).toEqual(['01', '02', '03', '04', '05'])
     expect([...document.querySelectorAll('.step-title')].map((item) => item.textContent)).toContain('Xsens: suit and streaming')
-    expect(document.querySelector('.setup-panel-head .silk')?.textContent).toBe('Step 2 · live route')
-    expect(document.body.textContent).not.toMatch(/guide step|04–05|step 0\d|ufw|sudo|bash |SSH/i)
+    expect(document.querySelector('.setup-panel-head .silk')?.textContent).toBe('Step 02 · live route')
+    expect(document.body.textContent).not.toMatch(/guide step|04–05|ufw|sudo|bash |SSH/i)
   })
 
   it('writes 127.0.0.1 and an empty receiver IP when Xsens runs on this PC', async () => {
@@ -687,7 +687,9 @@ describe('Setup desktop tools (Linux checkout console)', () => {
   it('adds step 13 only on the desktop console', async () => {
     await renderApp(desktop())
     const steps = [...document.querySelectorAll('.setup-stepper li')].map((item) => item.getAttribute('data-step'))
-    expect(steps).toEqual(['session', 'windows', 'stream', 'live', 'finish', 'k1'])
+    expect(steps).toEqual(['session', 'windows', 'stream', 'live', 'k1', 'finish'])
+    // 01, 02, 03; Live simulation and Real K1 share 04 (choose one); Finish 05
+    expect([...document.querySelectorAll('.setup-stepper .step-number')].map((item) => item.textContent)).toEqual(['01', '02', '03', '04', '04', '05'])
     // Optional: never marked as the next step.
     expect(document.querySelector('[data-step="k1"]')?.textContent).not.toContain('Next')
     cleanup()
@@ -830,7 +832,7 @@ describe('Setup desktop tools (Linux checkout console)', () => {
     goTo('retarget')
     fireEvent.click(screen.getByRole('button', { name: 'Make preview' }))
     await flush()
-    fireEvent.click(screen.getByRole('button', { name: 'Install it in step 13 · Real K1' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Install it in the Real K1 step' }))
     expect(panel()?.getAttribute('data-step')).toBe('k1')
   })
 

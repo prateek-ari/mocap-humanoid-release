@@ -113,6 +113,39 @@ send to the developers" below).
 In the commands below, `T=".venv/bin/python tools/control/k1_commission.py"` and
 `S=<the session folder that probe printed>`.
 
+## Live demo: the robot copies the performer (one page)
+
+For a demo, for example at an expo. No terminal, no K1 test window.
+
+**Open it:** click **K1 Live Demo** in the applications menu, or in the project folder run
+`bash k1-demo.sh`. The console opens on its **Demo** tab, step **04 · Real K1**. The steps on the
+left are numbered in order: 01 Session, 02 Windows: suit and streaming, 03 Check the stream, then
+**choose one**: 04 Live simulation (the 3D robot only) **or** 04 Real K1, then 05 Finish.
+
+People: the performer in the suit, one person at the laptop, one person at the robot with the
+remote (**LT + BACK = the real stop**). The robot hangs on the hoist.
+
+1. **Start the suit stream.** Xsens on the Windows PC streams to this laptop, port 5555. The page
+   shows where the data comes from; when one PC sends and its address is not the saved one, the
+   page fills it in by itself. Click **Start stream**: the 3D view opens on this laptop.
+2. **Calibrate the performer.** Click **Calibrate**: the page shows what to tell the performer
+   (stand up straight, arms down at the sides, look straight ahead, hold still). Then
+   **Calibrate now**. The line under it says **Calibrated.**, or what to fix.
+3. **Check the robot.** Robot standing, in **walking mode** (set with the remote), on the hoist.
+   Click **Check robot**: nothing moves. Every line turns green, or a red line says what to do.
+4. **Start the robot.** Choose how long (1, 2, 5 or 10 min) and whether the head follows, click
+   **Start robot**, read the three safety points, then **Yes, start the robot**. The performer holds
+   still until the big line says **FOLLOWING**; the robot's arms first move slowly to the
+   performer's pose. Then the performer moves, slowly at first.
+5. **Stop.** The big red **STOP ROBOT** button on the page (or the end of the time): the arms slow
+   down and are handed back, the head turns straight. The remote's LT + BACK always works.
+
+The page warns in red when another ROS 2 program runs on this laptop (for example **Isaac Sim**):
+close it first. It makes the robot's own software run out of memory and restart (found on
+2026-11-16). The robot's joint data of each run is saved in the run's folder (shown under
+**Details**). Rehearsal without the robot: `bash k1-demo.sh --practice` (a simulated robot; only
+when the console is not already running).
+
 ## Live suit to the real K1 in the UI
 
 One page for a live session: the performer in the Xsens suit moves the real K1's arms and head.

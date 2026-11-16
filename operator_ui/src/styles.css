@@ -1164,3 +1164,27 @@ html[data-theme='dark'] .live-host label.selected { color: var(--display); }
 }
 .sender-helper { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; }
 .calibrate-steps { margin: 0; padding-left: 22px; }
+
+/* Step 13 · live demo: big, plain, one page */
+.k1-banner { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; padding: 18px 20px; border: 2px solid var(--rule); border-radius: 4px; background: var(--display); }
+.k1-banner > strong { font-size: 1.75rem; line-height: 1.15; flex: 1 1 100%; }
+.k1-banner > span { font-size: 1.0625rem; color: var(--silk); flex: 1 1 auto; }
+.k1-banner.is-go { border-color: var(--green); background: color-mix(in srgb, var(--green) 10%, var(--display)); }
+.k1-banner.is-go > strong { color: var(--green-deep); }
+.k1-banner.is-ok { border-color: var(--green); }
+.k1-banner.is-busy { border-color: var(--blue); }
+.k1-banner.is-bad { border-color: var(--red); background: color-mix(in srgb, var(--red) 7%, var(--display)); }
+.k1-banner.is-bad > strong { color: var(--red-deep); }
+.k1-stop { font-size: 1.25rem; padding: 14px 28px; }
+.k1-steps { list-style: none; margin: 16px 0 0; padding: 0; display: grid; gap: 14px; }
+.k1-steps > li { border: 1px solid var(--rule-soft); border-radius: 4px; padding: 12px 14px; background: var(--key); display: grid; gap: 10px; }
+.k1-steps h3 { margin: 0; font-size: 1.25rem; display: flex; align-items: center; gap: 10px; }
+.k1-num { display: inline-grid; place-items: center; width: 2rem; height: 2rem; border-radius: 50%; background: var(--ink); color: var(--display); font-size: 1rem; }
+.k1-go { font-size: 1.125rem; }
+.k1-checks small { display: block; color: var(--red-deep); }
+.k1-log { max-height: 16rem; overflow: auto; }
+.k1-more, .k1-tools { margin-top: 14px; }
+.setup-stepper li.step-choice { padding-left: 10px; border-left: 3px solid var(--blue); }
+.step-choice-label { display: block; margin: 4px 0 4px; font-size: var(--step-silk); color: var(--blue-deep); text-transform: uppercase; letter-spacing: .04em; }
+.next-choice .panel-key { flex-direction: column; align-items: flex-start; gap: 2px; padding: 12px 18px; font-size: 1.0625rem; }
+.next-choice .panel-key small { font-size: .8125rem; font-weight: 400; opacity: .85; }

@@ -12,6 +12,8 @@ import {
   type JobKind,
   type JobOptions,
   type JobSummary,
+  type K1LiveRun,
+  type K1LiveStatus,
   type K1OpenOutcome,
   type K1Status,
   type PrivilegedAction,
@@ -26,9 +28,82 @@ import {
 } from './setupApi'
 import type { Led } from './status'
 
+/** Step 13 · the robot's checks, in plain words, with what to do when one is red. */
+const K1_CHECK_TEXT: Record<string, { label: string; fix: string }> = {
+  answers: { label: 'Robot answers', fix: 'Robot cable in and laptop on, then switch the robot off and on. Wait 2 minutes, then Check robot again.' },
+  robot: { label: 'Robot standing in walking mode', fix: 'Set walking mode with the remote. The robot hangs on the hoist, arms down, head straight.' },
+  sending: { label: 'Suit stream running', fix: 'Do step 1: Start stream (Xsens must be streaming).' },
+  calibrated: { label: 'Performer calibrated', fix: 'Do step 2: Calibrate.' },
+  tracking: { label: 'Tracking on', fix: 'Click Tracking on in step 2.' },
+  model: { label: 'Stream is for the K1', fix: 'Stop the stream and start it again from step 1.' },
+  clock: { label: 'Stream from this laptop', fix: 'Stop the stream and start it again from step 1.' },
+  arms: { label: 'Arms', fix: 'After Start robot the robot’s arms move slowly to the performer’s.' },
+}
+
+/** Why a run stopped, in plain words (prefix match on the bridge's reason). */
+const K1_ADVICE: [string, string][] = [
+  ['robot mode is prepare', 'The robot is not in walking mode. Set walking mode with the remote, then Check robot.'],
+  ['robot mode is damping', 'The robot is not in walking mode. Set walking mode with the remote, then Check robot.'],
+  ['did not report its serial', 'The robot does not answer on the cable. Switch the robot off and on with the cable in and the laptop on, wait 2 minutes, then Check robot.'],
+  ['no robot mode', 'The robot does not answer. Wait 1 minute (it may be starting), then Check robot. If it repeats, switch the robot off and on.'],
+  ['lag_stop', 'The performer moved too fast for too long. Start again and move slowly at first.'],
+  ['stream_late', 'The suit data came late. Check the suit and the network, then start again.'],
+  ['source_hard_timeout', 'The suit stream stopped. Check step 1 (stream running), then start again.'],
+  ['new_epoch', 'A new Calibrate stops the robot (normal). Start the robot again.'],
+  ['tracking_off', 'Tracking was switched off. Switch it on in step 2, then start again.'],
+  ['mode_not_allowed', 'The robot left walking mode. Set walking mode with the remote, then start again.'],
+  ['fall_state', 'The robot reports a fall. Check the robot on the hoist first.'],
+  ['another K1 motion process', 'Another robot program is running (the K1 test window?). Close it, then try again.'],
+]
+
+function k1Advice(reason: string | null): string {
+  if (!reason) return ''
+  const hit = K1_ADVICE.find(([key]) => reason.includes(key))
+  return hit ? hit[1] : 'Read the details below, then Check robot again.'
+}
+
+const minutesText = (seconds: number) => `${Math.floor(seconds / 60)}:${String(Math.floor(seconds % 60)).padStart(2, '0')}`
+
+/** Step 13's big status line. */
+export function k1Banner(run: K1LiveRun | null): { tone: 'idle' | 'busy' | 'go' | 'ok' | 'bad'; title: string; detail: string } {
+  if (!run) return { tone: 'idle', title: 'Ready to start', detail: 'Follow steps 1 to 4 below.' }
+  const live = run.live ?? {}
+  const state = typeof live.state === 'string' ? live.state : ''
+  const followed = typeof live.following_s === 'number' ? live.following_s : 0
+  const limit = run.settings.time_limit_s
+  if (run.running) {
+    if (run.stop_requested) return { tone: 'busy', title: 'Stopping…', detail: 'The arms slow down and are handed back to the robot.' }
+    if (run.action === 'check' || !state) return { tone: 'busy', title: 'Checking the robot and the stream…', detail: 'Nothing moves during the check.' }
+    if (state === 'following') return { tone: 'go', title: `FOLLOWING · ${minutesText(followed)} of ${minutesText(limit)}`, detail: 'The robot copies the performer. The performer can move: slow moves first.' }
+    if (state === 'aligning') return { tone: 'busy', title: 'Robot arms moving to the performer…', detail: 'Performer: hold still until it says FOLLOWING.' }
+    if (state === 'hold' || state === 'realign') return { tone: 'busy', title: 'Performer too fast: the robot catches up…', detail: 'Move a little slower.' }
+    if (state === 'waiting') return { tone: 'busy', title: 'Starting…', detail: 'Performer: stand still, arms down.' }
+    return { tone: 'busy', title: state.toUpperCase(), detail: '' }
+  }
+  const outcome = run.result?.outcome
+  const reason = run.result?.reason ?? null
+  if (outcome === 'ready') return { tone: 'ok', title: 'All checks green: ready', detail: 'Go to step 4: Start robot.' }
+  if (outcome === 'passed') return { tone: 'ok', title: 'Finished', detail: 'The run ended normally. Start again with step 4.' }
+  if (outcome === 'stopped') return { tone: 'ok', title: 'Stopped', detail: 'The arms were handed back to the robot. Start again with step 4.' }
+  if (run.action === 'check') return { tone: 'bad', title: 'Not ready', detail: k1Advice(reason) || 'See the red lines in step 3.' }
+  return { tone: 'bad', title: 'The robot stopped', detail: `${k1Advice(reason)}${reason ? ` (${reason.replace(/^REFUSED: /, '')})` : ''}` }
+}
+
+const K1_DEMO_KEY = 'mocap.k1demo'
+function loadK1Demo(): { net: string; operator: string; head: boolean; limit: number } {
+  const fallback = { net: '192.168.10.10', operator: '', head: true, limit: 120 }
+  try {
+    const saved: unknown = JSON.parse(window.localStorage.getItem(K1_DEMO_KEY) ?? 'null')
+    if (saved && typeof saved === 'object') return { ...fallback, ...saved }
+  } catch {
+    // no storage (private window): the defaults
+  }
+  return fallback
+}
+
 export type SetupStep = 'session' | 'windows' | 'stream' | 'live' | 'bvh' | 'retarget' | 'render' | 'finish' | 'k1'
 
-export const SETUP_STEPS: readonly SetupStep[] = ['session', 'windows', 'stream', 'live', 'bvh', 'retarget', 'render', 'finish', 'k1']
+export const SETUP_STEPS: readonly SetupStep[] = ['session', 'windows', 'stream', 'live', 'k1', 'bvh', 'retarget', 'render', 'finish']
 
 /** Job polling interval while a job is running. */
 export const JOB_POLL_MS = 500
@@ -61,7 +136,7 @@ const STEP_META: Record<SetupStep, StepMeta> = {
   retarget: { guide: '09', title: 'Retarget', route: 'recorded', kinds: ['retarget'], instruction: 'Click Make preview to turn the human motion into robot motion.' },
   render: { guide: '10', title: 'Watch and record', route: 'recorded', kinds: ['render'], instruction: 'Choose a motion, then click Record MP4. Let it finish.' },
   finish: { guide: '11', title: 'Finish', route: null, kinds: ['save'], instruction: 'Stop anything still running, then click Save report.' },
-  k1: { guide: '13', title: 'Real K1', route: null, kinds: ['k1_install'], instruction: 'Install the K1 test tools once, then click Open K1 test window.' },
+  k1: { guide: '13', title: 'Real K1', route: 'live', kinds: ['k1_install', 'live'], instruction: 'The robot copies the performer: do steps 1 to 4 below, top to bottom.' },
 }
 
 /** Live-route jobs that show the viewer in the gmr-xsens-live container; Stop ends them normally. */
@@ -590,7 +665,7 @@ export function SetupView({ client, initial, hidden = false }: SetupViewProps) {
     })
   }, [client, stepJobId, stepJob])
 
-  const senderStep = !windows && (step === 'stream' || step === 'live')
+  const senderStep = !windows && (step === 'stream' || step === 'live' || step === 'k1')
   useEffect(() => {
     if (!senderStep || hidden) return
     let active = true
@@ -628,6 +703,18 @@ export function SetupView({ client, initial, hidden = false }: SetupViewProps) {
     }
   }
 
+  // Step 13 (live demo): one Xsens PC sends and it is not the session's: fill it in by itself,
+  // before the stream starts (two senders: no guess; the panel asks to stop one).
+  const autoSenderRef = useRef<string | null>(null)
+  const streamUp = jobs.some((job) => job.kind === 'live' && job.state === 'running')
+  const onlySender = sender && sender.senders.length === 1 ? sender.senders[0] : null
+  useEffect(() => {
+    if (step !== 'k1' || !session || streamUp || usingSender || !onlySender) return
+    if (onlySender === session.windows_xsens_ip || autoSenderRef.current === onlySender) return
+    autoSenderRef.current = onlySender
+    void adoptSender(onlySender)
+  })
+
   const refreshK1 = useCallback(async () => {
     try {
       const status = await client.getK1()
@@ -653,6 +740,51 @@ export function SetupView({ client, initial, hidden = false }: SetupViewProps) {
     })
     return () => { active = false }
   }, [client, step, setup.desktop_tools, k1InstallState])
+
+  const [k1Live, setK1Live] = useState<K1LiveStatus | null>(null)
+  const [k1LiveError, setK1LiveError] = useState<string | null>(null)
+  const [k1Pending, setK1Pending] = useState<'check' | 'go' | 'stop' | null>(null)
+  const [k1Confirm, setK1Confirm] = useState(false)
+  const [k1Demo, setK1Demo] = useState(loadK1Demo)
+  const updateK1Demo = (change: Partial<typeof k1Demo>) => {
+    setK1Demo((current) => {
+      const next = { ...current, ...change }
+      try { window.localStorage.setItem(K1_DEMO_KEY, JSON.stringify(next)) } catch { /* no storage */ }
+      return next
+    })
+  }
+  // Step 13: the robot panel's status once a second while the step is open.
+  useEffect(() => {
+    if (step !== 'k1' || !setup.desktop_tools) return
+    let active = true
+    const poll = () => {
+      client.getK1Live().then((status) => {
+        if (!active || !aliveRef.current) return
+        setK1Live(status)
+        setK1LiveError(null)
+      }, (reason: unknown) => {
+        if (active && aliveRef.current) setK1LiveError(errorMessage(reason, 'The robot panel could not read its status.'))
+      })
+    }
+    poll()
+    const timer = window.setInterval(poll, 1000)
+    return () => { active = false; window.clearInterval(timer) }
+  }, [client, step, setup.desktop_tools])
+
+  async function k1Action(action: 'check' | 'go' | 'stop') {
+    setK1Pending(action)
+    setK1LiveError(null)
+    try {
+      if (action === 'stop') await client.stopK1Live()
+      else await client.startK1Live({ action, net: k1Demo.net.trim() || '192.168.10.10', operator: k1Demo.operator, head: k1Demo.head, time_limit_s: k1Demo.limit })
+      const status = await client.getK1Live()
+      if (aliveRef.current) setK1Live(status)
+    } catch (reason) {
+      if (aliveRef.current) setK1LiveError(errorMessage(reason, action === 'stop' ? 'STOP did not reach the robot program. Use the remote: LT+BACK.' : 'The robot program did not start.'))
+    } finally {
+      if (aliveRef.current) setK1Pending(null)
+    }
+  }
 
   async function openK1Window() {
     setK1Opening(true)
@@ -852,8 +984,15 @@ export function SetupView({ client, initial, hidden = false }: SetupViewProps) {
   const checkSeconds = Math.round(setup.stream_check_s)
   const meta: StepMeta = { ...STEP_META[step], ...(windows ? WINDOWS_STEP_META[step] : undefined) }
   // The Linux engineer-guide numbers mean nothing on Windows: number the visible steps instead.
-  const stepLabel = (item: SetupStep) => windows ? String(steps.indexOf(item) + 1) : STEP_META[item].guide
-  const stepWord = windows && steps.includes(step) ? String(steps.indexOf(step) + 1) : meta.guide
+  // 01, 02, 03 … in the order shown; Live simulation and Real K1 share one number (choose one).
+  const stepNumbers = new Map<SetupStep, string>()
+  steps.reduce((n, item) => {
+    const next = item === 'k1' && steps.includes('live') ? n : n + 1
+    stepNumbers.set(item, String(next).padStart(2, '0'))
+    return next
+  }, 0)
+  const stepLabel = (item: SetupStep) => stepNumbers.get(item) ?? STEP_META[item].guide
+  const stepWord = stepNumbers.get(step) ?? meta.guide
   const stepActionError = actionError?.step === step ? actionError : null
   const stepError = stepActionError && (
     <>
@@ -861,7 +1000,7 @@ export function SetupView({ client, initial, hidden = false }: SetupViewProps) {
       {stepActionError.code === 'recorded_runtime_missing' && setup.desktop_tools && (
         <div className="setup-actions">
           <button type="button" className="panel-key" onClick={() => selectStep('k1')}>
-            <Download aria-hidden="true" />Install it in step 13 · Real K1
+            <Download aria-hidden="true" />Install it in the Real K1 step
           </button>
         </div>
       )}
@@ -896,7 +1035,7 @@ export function SetupView({ client, initial, hidden = false }: SetupViewProps) {
   )
 
   const noSessionNote = !session && step !== 'session' && step !== 'windows' && step !== 'k1' && (
-    <p className="setup-callout is-warning"><AlertTriangle aria-hidden="true" /><span>Save a session first ({windows ? 'Session step' : 'step 03'}). The buttons below stay locked until then.</span></p>
+    <p className="setup-callout is-warning"><AlertTriangle aria-hidden="true" /><span>Save a session first ({windows ? 'Session step' : 'Session step'}). The buttons below stay locked until then.</span></p>
   )
 
   const field = (name: SessionField, label: string, input: ReactNode) => (
@@ -957,7 +1096,7 @@ export function SetupView({ client, initial, hidden = false }: SetupViewProps) {
             </div>
             {last?.result === 'FAIL' && <ActionError message={`The last update failed. ${last.details.join(' ')}`.trim()} />}
             {last?.result === 'PASS' && last.details.length > 0 && <p className="group-note">{last.details.join(' ')}</p>}
-            <p className="group-note">To update: stop the console (step 11 · Shut down the console), then open <strong>Mocap Update</strong> from the applications menu.</p>
+            <p className="group-note">To update: stop the console (Finish · Shut down the console), then open <strong>Mocap Update</strong> from the applications menu.</p>
           </fieldset>
         )}
         <form className="setup-form" onSubmit={(event) => { event.preventDefault(); void saveSession() }} noValidate>
@@ -1082,7 +1221,7 @@ export function SetupView({ client, initial, hidden = false }: SetupViewProps) {
               <>
                 <li><Lamp state={readyLed(setup.readiness.recorded_runtime)} /><span>Recorded runtime<small className="mono">{draft.mocap_ws || 'not set'}</small></span><strong>{readyWord(setup.readiness.recorded_runtime)}</strong></li>
                 {setup.readiness.recorded_runtime === false && setup.desktop_tools && (
-                  <li><span /><span>Install it with the K1 test tools in step 13.</span><button type="button" className="panel-key" onClick={() => selectStep('k1')}><Download aria-hidden="true" />Go to step 13</button></li>
+                  <li><span /><span>Install it with the K1 test tools in the Real K1 step.</span><button type="button" className="panel-key" onClick={() => selectStep('k1')}><Download aria-hidden="true" />Go to Real K1</button></li>
                 )}
                 <li><Lamp state={readyLed(setup.readiness.motion_bvh)} /><span>Motion BVH<small className="mono">{draft.motion_bvh || 'not set'}</small></span><strong>{readyWord(setup.readiness.motion_bvh)}</strong></li>
                 <li><Lamp state={readyLed(setup.readiness.npose_bvh)} /><span>Neutral-pose BVH<small className="mono">{draft.npose_bvh || 'not set'}</small></span><strong>{readyWord(setup.readiness.npose_bvh)}</strong></li>
@@ -1111,7 +1250,7 @@ export function SetupView({ client, initial, hidden = false }: SetupViewProps) {
     return (
       <>
         <fieldset className="group">
-          <legend className="silk">Before streaming{windows ? '' : ' · guide step 04'}</legend>
+          <legend className="silk">Before streaming</legend>
           <ol className="setup-checklist">
             <li>Power the router, Body Pack and sensors. Check all sensors are healthy in Xsens.</li>
             <li>Enter the performer's <strong>measured</strong> body dimensions.</li>
@@ -1119,13 +1258,13 @@ export function SetupView({ client, initial, hidden = false }: SetupViewProps) {
           </ol>
         </fieldset>
         <fieldset className="group">
-          <legend className="silk">Network Streamer{windows ? '' : ' · guide step 05'}</legend>
+          <legend className="silk">Network Streamer</legend>
           <p className="group-note">In Xsens Humanoid open <strong>Options → Network Streamer</strong> (labels vary by version).</p>
           <div className="plate-row">
             <ValuePlate
               label="Destination"
               value={linuxIp}
-              note={onThisPc ? 'Xsens runs on this PC' : linuxIp ? destinationLabel : `Set ${windows ? "This PC's IP in the Session step" : 'the Linux Xsens IP in step 03'}`}
+              note={onThisPc ? 'Xsens runs on this PC' : linuxIp ? destinationLabel : `Set ${windows ? "This PC's IP in the Session step" : 'the Linux Xsens IP in the Session step'}`}
             />
             <ValuePlate label="Port" value={STREAM_PORT} note="UDP" />
             <ValuePlate label="Protocol" value="UDP" copy={false} />
@@ -1174,7 +1313,7 @@ export function SetupView({ client, initial, hidden = false }: SetupViewProps) {
                 </div>
               </>
             ) : (
-              <p>Save both IP addresses in step 03 to get the firewall command.</p>
+              <p>Save both IP addresses in the Session step to get the firewall command.</p>
             )}
           </div>
         </div>
@@ -1287,16 +1426,25 @@ export function SetupView({ client, initial, hidden = false }: SetupViewProps) {
           <table className="hint-table">
             <thead><tr><th>You see</th><th>Fix</th></tr></thead>
             <tbody>
-              <tr><td className="mono">No UDP traffic</td><td>{windows ? 'Is Xsens streaming? Check the destination IP, port 5555 and the Windows Firewall note in the Xsens step.' : 'Is Xsens streaming? Check the destination IP, port 5555, the Ethernet cable and the firewall rule (step 05).'}</td></tr>
+              <tr><td className="mono">No UDP traffic</td><td>{windows ? 'Is Xsens streaming? Check the destination IP, port 5555 and the Windows Firewall note in the Xsens step.' : 'Is Xsens streaming? Check the destination IP, port 5555, the Ethernet cable and the firewall rule (Windows step).'}</td></tr>
               <tr><td className="mono">Only MXTP12 / MXTP13</td><td>Turn on the quaternion and joint-angle streams, then start preview or playback.</td></tr>
               <tr><td className="mono">unexpected source</td><td>{windows
                 ? "The Xsens source IP changed. Update it in the Session step and save. If Xsens runs on this PC, make sure its destination is 127.0.0.1, not this PC's LAN IP."
-                : 'The Windows IP changed. Update it in step 03 and save.'}</td></tr>
+                : 'The Windows IP changed. Update it in the Session step and save.'}</td></tr>
               <tr><td className="mono">Address already in use</td><td>Another receiver is running. Stop it; run one receiver at a time.</td></tr>
             </tbody>
           </table>
           <p className="group-note">Do not continue on a failed check.</p>
         </fieldset>
+        {steps.includes('k1') && (
+          <fieldset className="group">
+            <legend className="silk">Next: choose one</legend>
+            <div className="setup-actions next-choice">
+              <button type="button" className="panel-key setup-run is-primary" onClick={() => selectStep('live')}><Play aria-hidden="true" />Live simulation<small>the 3D robot on this PC</small></button>
+              <button type="button" className="panel-key setup-run is-primary" onClick={() => selectStep('k1')}><Bot aria-hidden="true" />Real K1<small>the real robot copies the performer</small></button>
+            </div>
+          </fieldset>
+        )}
       </>
     )
   }
@@ -1590,7 +1738,7 @@ export function SetupView({ client, initial, hidden = false }: SetupViewProps) {
             {shutdownError && <ActionError message={shutdownError} />}
           </fieldset>
         )}
-        <p className="group-note">Nothing here approves physical robot use. For the next take, click New session in {windows ? 'the Session step' : 'step 03'}.</p>
+        <p className="group-note">Nothing here approves physical robot use. For the next take, click New session in the Session step.</p>
       </>
     )
   }
@@ -1602,8 +1750,195 @@ export function SetupView({ client, initial, hidden = false }: SetupViewProps) {
     const status = k1
     const known = status?.available === true
     const installJob = jobs.find((job) => job.kind === 'k1_install')
+    const streamJob = jobs.find((job) => job.kind === 'live')
+    const streamRunning = streamJob?.state === 'running'
+    const otherViewer = runningJob && runningJob.kind !== 'live' ? runningJob : null
+    const live = streamRunning && streamJob ? streamJob.live ?? null : null
+    const run = k1Live?.run ?? null
+    const robotRunning = run?.running === true
+    const robotMoving = robotRunning && run?.action === 'go'
+    const banner = k1Banner(run)
+    const others = k1Live?.other_dds ?? []
+    const checks = run?.checks ?? []
+    const step3Done = run?.action === 'check' && run.result?.outcome === 'ready'
+    async function controlLive(liveJob: JobSummary, command: ControlCommand) {
+      setControlError(null)
+      setControlPending(command)
+      try {
+        const request = await client.controlJob(liveJob.id, command)
+        if (command === 'calibrate' && aliveRef.current) setCalibration({ jobId: liveJob.id, request, sentAt: Date.now() })
+      } catch (reason) {
+        if (!aliveRef.current) return
+        setControlError(reason instanceof SetupApiError && reason.status === 409
+          ? 'The simulation is no longer running or reading commands.'
+          : errorMessage(reason, 'The simulation did not accept the command.'))
+      } finally {
+        if (aliveRef.current) setControlPending(null)
+      }
+    }
+    const lampOf = (ok: boolean | null | undefined): Led => ok === true ? 'passed' : ok === false ? 'fault' : 'off'
+    const canStartRobot = known && status.installed && streamRunning && !!live?.calibrated && !robotRunning && others.length === 0
     return (
       <>
+        <fieldset className="group k1-demo">
+          <legend className="silk">Live demo · the robot copies the performer</legend>
+          <div className={`k1-banner is-${banner.tone}`} role="status" aria-live="polite">
+            <strong>{banner.title}</strong>
+            {banner.detail && <span>{banner.detail}</span>}
+            {robotRunning && (
+              <button type="button" className="panel-key setup-run is-stop k1-stop" disabled={k1Pending === 'stop' || run?.stop_requested} onClick={() => void k1Action('stop')}>
+                <Square aria-hidden="true" />{run?.stop_requested ? 'Stopping…' : 'STOP ROBOT'}
+              </button>
+            )}
+          </div>
+          {k1Live?.practice
+            ? <p className="setup-callout"><Bot aria-hidden="true" /><span><strong>PRACTICE:</strong> a simulated robot, not the real K1. Nothing moves on the real robot.</span></p>
+            : <p className="group-note">The real stop is always the remote: <strong>LT + BACK</strong>.</p>}
+          {others.length > 0 && (
+            <p className="setup-callout is-warning" role="alert"><AlertTriangle aria-hidden="true" /><span><strong>Close {others.map((item) => item.name).join(', ')} first.</strong> Another ROS 2 program is running on this laptop (for example Isaac Sim). It makes the robot&rsquo;s software crash when the robot connects.</span></p>
+          )}
+          {known && !status.installed && (
+            <p className="setup-callout is-warning"><AlertTriangle aria-hidden="true" /><span>The K1 tools are not installed yet: open <strong>Install and test tools</strong> at the bottom of this page.</span></p>
+          )}
+          {k1LiveError && <ActionError message={k1LiveError} />}
+
+          <ol className="k1-steps">
+            <li>
+              <h3><span className="k1-num">1</span>Start the suit stream</h3>
+              <p className="group-note">Xsens must be streaming to this laptop. The 3D view opens on this laptop.</p>
+              {!streamRunning && senderPanel()}
+              <div className="live-tracking">
+                <span className={`live-flag ${streamRunning ? 'is-on' : ''}`}><Lamp state={streamRunning ? 'passed' : 'off'} /><span>Stream <strong>{streamRunning ? 'running' : 'off'}</strong></span></span>
+                <span className={`live-flag ${live ? 'is-on' : ''}`}><Lamp state={live ? 'passed' : streamRunning ? 'active' : 'off'} /><span>Suit data <strong>{live ? 'arriving' : streamRunning ? 'waiting…' : '—'}</strong></span></span>
+              </div>
+              <div className="setup-actions">
+                {!streamRunning && runKey('k1', 'live', 'Start stream', <Play aria-hidden="true" />, { robot_stream: true, record_video: false, calibrate_after_s: null }, true, noDisplay || !!otherViewer)}
+                {streamRunning && streamJob && (
+                  <button type="button" className="panel-key setup-run" disabled={isStopping(streamJob.id) || robotMoving} onClick={() => void stopJob(streamJob)}>
+                    {isStopping(streamJob.id) ? <RefreshCw className="spin" aria-hidden="true" /> : <Square aria-hidden="true" />}{isStopping(streamJob.id) ? 'Stopping…' : 'Stop stream'}
+                  </button>
+                )}
+              </div>
+              {otherViewer && <p className="group-note">Another job runs ({otherViewer.label}): stop it first.</p>}
+              {robotMoving && streamRunning && <p className="group-note">Stop the robot before you stop the stream.</p>}
+              {!session && <p className="group-note">Save a session in the Session step first.</p>}
+              {noDisplay && displayNote}
+              {stepError}
+            </li>
+
+            <li>
+              <h3><span className="k1-num">2</span>Calibrate the performer</h3>
+              <div className="live-tracking">
+                <span className={`live-flag ${live?.calibrated ? 'is-on' : ''}`}><Lamp state={live?.calibrated ? 'passed' : 'off'} /><span>Calibrated <strong>{live ? live.calibrated ? 'yes' : 'no' : '—'}</strong></span></span>
+                <span className={`live-flag ${live?.enabled ? 'is-on' : ''}`}><Lamp state={live?.enabled ? 'active' : 'off'} /><span>Tracking <strong>{live ? live.enabled ? 'on' : 'off' : '—'}</strong></span></span>
+              </div>
+              {streamJob && calibrateAsk === streamJob.id ? (
+                <div className="setup-callout is-warning" role="alertdialog" aria-label="Calibrate now?">
+                  <AlertTriangle aria-hidden="true" />
+                  <div>
+                    <p><strong>Tell the performer:</strong></p>
+                    <ol className="calibrate-steps">
+                      <li>Stand up straight.</li>
+                      <li>Arms down at the sides.</li>
+                      <li>Look straight ahead.</li>
+                      <li>Hold still until it says Calibrated.</li>
+                    </ol>
+                    <div className="setup-actions">
+                      <button type="button" className="panel-key is-primary" disabled={controlPending !== null || !live} onClick={() => { setCalibrateAsk(null); void controlLive(streamJob, 'calibrate') }}><Crosshair aria-hidden="true" />Calibrate now</button>
+                      <button type="button" className="panel-key" onClick={() => setCalibrateAsk(null)}>Cancel</button>
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                <div className="setup-actions">
+                  <button type="button" className="panel-key setup-run is-primary" disabled={!streamJob || !live || controlPending !== null || robotMoving} onClick={() => streamJob && setCalibrateAsk(streamJob.id)}><Crosshair aria-hidden="true" />Calibrate</button>
+                  {live && !live.enabled && streamJob && (
+                    <button type="button" className="panel-key" disabled={controlPending !== null} onClick={() => void controlLive(streamJob, 'toggle_tracking')}><Power aria-hidden="true" />Tracking on</button>
+                  )}
+                </div>
+              )}
+              {robotMoving && <p className="group-note">Calibrate is locked while the robot follows (a new Calibrate would stop it).</p>}
+              {streamJob && calibrationLine(streamJob)}
+              {controlError && <span className="field-error" role="alert">{controlError}</span>}
+            </li>
+
+            <li>
+              <h3><span className="k1-num">3</span>Check the robot</h3>
+              <p className="group-note">The robot hangs on the hoist, standing, in <strong>walking mode</strong> (set it with the remote). Nothing moves during the check.</p>
+              <div className="setup-actions">
+                <button type="button" className="panel-key setup-run is-primary" disabled={!canStartRobot || k1Pending !== null} onClick={() => void k1Action('check')}>
+                  {robotRunning && run?.action === 'check' ? <RefreshCw className="spin" aria-hidden="true" /> : <ShieldCheck aria-hidden="true" />}Check robot
+                </button>
+              </div>
+              {checks.length > 0 && (
+                <ul className="chain readiness k1-checks">
+                  {checks.map((item) => {
+                    const text = K1_CHECK_TEXT[item.key]
+                    return (
+                      <li key={item.key}>
+                        <Lamp state={lampOf(item.ok)} />
+                        <span>{text?.label ?? item.key}{item.ok === false && <small>{text?.fix ?? item.text}</small>}</span>
+                        <strong>{item.ok === true ? 'OK' : item.ok === false ? 'FIX' : '…'}</strong>
+                      </li>
+                    )
+                  })}
+                </ul>
+              )}
+            </li>
+
+            <li>
+              <h3><span className="k1-num">4</span>Start the robot</h3>
+              <div className="setup-options">
+                <label className="check-option">
+                  <span>Run for</span>
+                  <select value={k1Demo.limit} onChange={(event) => updateK1Demo({ limit: Number(event.target.value) })} disabled={robotRunning}>
+                    {(k1Live?.limits_s ?? [60, 120, 300, 600]).map((value) => <option key={value} value={value}>{value / 60} min</option>)}
+                  </select>
+                </label>
+                <label className="check-option">
+                  <input type="checkbox" checked={k1Demo.head} disabled={robotRunning} onChange={(event) => updateK1Demo({ head: event.target.checked })} />
+                  <span>Head follows too</span>
+                </label>
+              </div>
+              {k1Confirm && !robotRunning ? (
+                <div className="setup-callout is-warning" role="alertdialog" aria-label="Start the robot?">
+                  <AlertTriangle aria-hidden="true" />
+                  <div>
+                    <p><strong>Before you start:</strong></p>
+                    <ol className="calibrate-steps">
+                      <li>The robot hangs on the hoist; nobody stands within reach of its arms.</li>
+                      <li>Someone holds the remote (LT + BACK stops the robot).</li>
+                      <li>The performer stands still, arms down, until the screen says FOLLOWING.</li>
+                    </ol>
+                    <div className="setup-actions">
+                      <button type="button" className="panel-key setup-run is-primary" disabled={k1Pending !== null} onClick={() => { setK1Confirm(false); void k1Action('go') }}><Play aria-hidden="true" />Yes, start the robot</button>
+                      <button type="button" className="panel-key" onClick={() => setK1Confirm(false)}>Cancel</button>
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                <div className="setup-actions">
+                  <button type="button" className="panel-key setup-run is-primary k1-go" disabled={!canStartRobot || k1Pending !== null} onClick={() => setK1Confirm(true)}><Bot aria-hidden="true" />Start robot</button>
+                </div>
+              )}
+              {!canStartRobot && !robotRunning && <p className="group-note">{!streamRunning ? 'Do step 1 first.' : !live?.calibrated ? 'Do step 2 first.' : others.length ? 'Close the other ROS 2 program first (see the warning above).' : ''}{step3Done ? '' : ''}</p>}
+            </li>
+          </ol>
+
+          <details className="setup-details k1-more">
+            <summary>Details</summary>
+            <div className="form-grid">
+              <label>Robot network address of this laptop<input className="mono" value={k1Demo.net} disabled={robotRunning} onChange={(event) => updateK1Demo({ net: event.target.value })} /></label>
+              <label>Your name (for the run record)<input value={k1Demo.operator} disabled={robotRunning} onChange={(event) => updateK1Demo({ operator: event.target.value })} /></label>
+            </div>
+            {run?.robot_data && <p className="group-note">Robot data: {run.robot_data.state} <span className="mono">{run.robot_data.folder}</span></p>}
+            {run?.session && <p className="group-note">Run record: <span className="mono">{run.session}</span></p>}
+            {run && run.lines.length > 0 && <pre className="setup-console k1-log">{run.lines.join('\n')}</pre>}
+          </details>
+        </fieldset>
+
+        <details className="setup-details k1-tools">
+          <summary>Install and test tools (for engineers)</summary>
         <fieldset className="group">
           <legend className="silk">K1 test tools on this PC</legend>
           {k1Error && <ActionError message={k1Error} />}
@@ -1624,10 +1959,10 @@ export function SetupView({ client, initial, hidden = false }: SetupViewProps) {
             )}
             <button type="button" className="panel-key" onClick={() => void refreshK1()}><RefreshCw aria-hidden="true" />Check again</button>
           </div>
-          <p className="group-note">{session ? `Installs the recorded runtime (with the K1 model) into ${shown(session.mocap_ws)} and the Booster SDK into the project, without sudo. Safe to run again.` : 'Save a session in step 03 first: the install uses its runtime folder.'}{known && status.window_open ? ' Close the K1 test window before you install.' : ''}</p>
+          <p className="group-note">{session ? `Installs the recorded runtime (with the K1 model) into ${shown(session.mocap_ws)} and the Booster SDK into the project, without sudo. Safe to run again.` : 'Save a session in the Session step first: the install uses its runtime folder.'}{known && status.window_open ? ' Close the K1 test window before you install.' : ''}</p>
           {adminResult?.action === 'install_tk' && <AdminOutcome result={adminResult} copy="sudo apt-get install -y python3-tk" />}
           {stepError}
-          {consoleFor(stepJob ?? installJob)}
+          {consoleFor(stepJob?.kind === 'k1_install' ? stepJob : installJob)}
         </fieldset>
         <fieldset className="group">
           <legend className="silk">K1 test window</legend>
@@ -1647,6 +1982,7 @@ export function SetupView({ client, initial, hidden = false }: SetupViewProps) {
           )}
           {known && status.log && <p className="group-note">Window log: <span className="mono">{status.log}</span></p>}
         </fieldset>
+        </details>
       </>
     )
   }
@@ -1677,8 +2013,10 @@ export function SetupView({ client, initial, hidden = false }: SetupViewProps) {
         <ol>
           {steps.map((item) => {
             const led = leds[item]
+            const choice = item === 'live' && steps.includes('k1')
             return (
-              <li key={item} data-step={item}>
+              <li key={item} data-step={item} className={item === 'live' || item === 'k1' ? 'step-choice' : undefined}>
+                {choice && <span className="step-choice-label silk">Then choose one</span>}
                 <button type="button" className={step === item ? 'active' : ''} aria-current={step === item ? 'step' : undefined} onClick={() => selectStep(item)}>
                   <span className="step-number mono">{stepLabel(item)}</span>
                   <span className="step-title">{(windows && WINDOWS_STEP_META[item]?.title) || STEP_META[item].title}</span>
@@ -1699,7 +2037,7 @@ export function SetupView({ client, initial, hidden = false }: SetupViewProps) {
         </header>
         {refreshError && <ActionError message={refreshError} />}
         {routeMismatch && step !== 'session' && (
-          <p className="setup-callout is-warning"><AlertTriangle aria-hidden="true" /><span>The saved session uses the {session.route} route. Save the session in {windows ? 'the Session step' : 'step 03'} to switch.</span></p>
+          <p className="setup-callout is-warning"><AlertTriangle aria-hidden="true" /><span>The saved session uses the {session.route} route. Save the session in the Session step to switch.</span></p>
         )}
         {runningJob && !STEP_META[step].kinds.includes(runningJob.kind) && (
           <div className="setup-callout running-strip">
