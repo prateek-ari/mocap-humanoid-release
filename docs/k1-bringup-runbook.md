@@ -713,12 +713,17 @@ the K1 head has no roll.
   no head command at all.
 - **A head problem is not an arm stop.** If head commands fail for 0.5 s, only the head switches
   off for this run: the status shows `head off` and the arms continue.
-- **First run on the real robot (2026-11-16).** Robot on the hoist, the 2026-11-15 Xsens capture
-  played back as the performer, arms and head, 60 s: PASS. 2916 head commands, 0 failures; the
-  head turned -45° to +42° and looked down up to 12°; command against measured, 95th percentile:
-  1.4° (turn), 0.3° (up/down). The end move was refused (code 400) 1 ms after the arm release
-  and the head stayed at its last angle; the same call worked later with the robot idle. The
-  fix above (send it again) has not run on the robot yet.
+- **First runs on the real robot (2026-11-16).** Robot on the hoist, the 2026-11-15 Xsens capture
+  played back as the performer, arms and head: 60 s PASS, then 30 s PASS. In the 60 s run: 2916
+  head commands, 0 failures; the head turned -45° to +42° and looked down up to 12°; command
+  against measured, 95th percentile: 1.4° (turn), 0.3° (up/down). At the end the robot refused
+  the head move (code 400) for about 1.2 s after the arm release; sent again, it was accepted
+  on the fifth try. The joint data of the 30 s run shows that the head was almost straight
+  before that: it went from 4.8° down to 0.6° in the 0.5 s after the arm release, with no head
+  move accepted yet. So the robot seems to bring the head back by itself when the arms are
+  released; the repeated move finishes it and the log ends with "confirmed". Whether the robot
+  also brings a turned head (left/right) back by itself is not measured: the head was at 0°
+  turn at the end of both head runs.
 - **Direction check with a live performer (not yet done).** Hold the robot as for the arms, then turn the
   performer's head **slowly** left, right, up and down. Confirm that the robot's head looks the
   same way each time (performer looks left: the robot looks to its left; performer looks down: the
