@@ -121,12 +121,6 @@ window**; no terminal is needed. People: the performer, an operator at the PC, a
 the robot with the remote (**LT+BACK = damping, the real stop**). Keep the robot held or on the
 hoist.
 
-> **In this version, three things on this page are not there yet; they come with the next update:**
-> the calibration result line (step 5 shows "No answer from the live simulation": use the
-> **Calibrated** lamp), the recordings of step 9, and **Mocap Update** (step 11; until then, close
-> the K1 test window and the console, then run `git pull --ff-only` and `bash install-ubuntu.sh`
-> in the checkout).
-
 1. **Software.** Setup console, step **03 · Session**, box **Software**: **Running version**
    (commit and date of this checkout) and **Last update** (the result line of the last
    **Mocap Update**: time, PASS or FAIL, old commit -> new commit). A failed update is shown in

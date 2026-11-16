@@ -59,7 +59,7 @@ On the Ubuntu PC, open a terminal and paste this line:
 sudo apt-get update && sudo apt-get install -y git && git clone https://github.com/prateek-ari/mocap-humanoid-release.git && cd mocap-humanoid-release && bash install-ubuntu.sh
 ```
 
-Already downloaded the project? Run `bash install-ubuntu.sh` from its folder. To update an earlier install (for example, to get the Booster K1), run `git pull` in the project folder and then `bash install-ubuntu.sh` again: it rebuilds the live simulation.
+Already downloaded the project? Run `bash install-ubuntu.sh` from its folder. To update an earlier install: stop the Setup console (its **Shut down** button), close the K1 test window, then open **Mocap Update** from the applications menu. It downloads the new version and runs the installer in a terminal, and it refuses to start while one of the project's programs runs. If there is no **Mocap Update** entry yet (an install from before it existed), run `git pull` in the project folder and then `bash install-ubuntu.sh` once: it rebuilds the live simulation and adds the entry.
 
 The script checks the PC and installs only what is missing: the NVIDIA driver, Docker, the NVIDIA Container Toolkit and the project itself. If it installs the NVIDIA driver, it asks you to restart: run the same command again after the restart. Run it from a terminal on the PC's desktop, not over SSH. `bash install-ubuntu.sh --check` only reports what is missing.
 
