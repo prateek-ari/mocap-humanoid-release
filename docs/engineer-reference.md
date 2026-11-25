@@ -242,7 +242,7 @@ Review the dry run first. The helper persistently configures an `Xsens Ethernet`
 
 ### Stream acceptance
 
-`tools/xsens/live_operator.sh acceptance` samples 30 seconds, filters `XSENS_SOURCE_IP`, requires at least 300 body frames at 50 Hz or more, at most 1% packet loss, and paired body/joint-angle frames. It writes `artifacts/xsens-live/<timestamp>/stream-acceptance.json` (ignored by Git; contains network details, so sanitize before sharing). MXTP12/13 only means metadata/scaling arrived. An animated Windows view, received UDP bytes or the synthetic self-test are not an acceptance pass. Do not reuse an old report after changing source, settings or calibration.
+`tools/xsens/live_operator.sh acceptance` samples 30 seconds, filters `XSENS_SOURCE_IP`, requires at least 300 body frames at 50 Hz or more, at most 1% packet loss, and paired body/joint-angle frames. It writes `artifacts/xsens-live/<timestamp>/stream-acceptance.json` (ignored by Git; contains network details, so sanitize before sharing). MXTP12/13 only means metadata/scaling arrived. An animated Windows view, received UDP bytes or the synthetic self-test are not an acceptance pass. Do not reuse an old report after changing source, settings or calibration. A recorded take that MVN plays in a loop restarts its counters and time code; the check grades each pass on its own and warns `MVN playback looped N time(s)` (a real suit test needs the live suit, not a playback).
 
 ### Optional ROS 2 topics
 

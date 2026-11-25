@@ -18,6 +18,11 @@ from .mxtp02 import (
 )
 
 
+#: A backward counter jump larger than this, with the time code also going back, is a new
+#: pass of a looped MVN playback, not reordering (same threshold as xsens_live's restart).
+PLAYBACK_LOOP_BACKJUMP = 32
+
+
 @dataclass
 class _PacketSeries:
     valid: int = 0
@@ -29,8 +34,9 @@ class _PacketSeries:
     dropped: int = 0
     duplicates: int = 0
     out_of_order: int = 0
+    playback_loops: int = 0
     time_steps_ms: list[int] = field(default_factory=list)
-    counters: set[int] = field(default_factory=set)
+    counters: set[tuple[int, int]] = field(default_factory=set)  # (playback pass, counter)
     character_ids: set[int] = field(default_factory=set)
 
     def add(self, counter: int, time_code_ms: int, received_at: float, character_id: int) -> None:
@@ -38,9 +44,20 @@ class _PacketSeries:
         if self.first_received_at is None:
             self.first_received_at = received_at
         self.last_received_at = received_at
-        already_seen = counter in self.counters
-        self.counters.add(counter)
         self.character_ids.add(character_id)
+        if (self.max_counter is not None and self.previous_time_code_ms is not None
+                and -counter_delta(counter, self.max_counter) > PLAYBACK_LOOP_BACKJUMP
+                and (time_code_ms - self.previous_time_code_ms) % UINT32_MODULUS >= UINT32_HALF_RANGE):
+            # MVN replayed a take from its start: counter and time code restart. Grade the new pass
+            # on its own; the report names the loops as a warning.
+            self.playback_loops += 1
+            self.first_counter = self.max_counter = counter
+            self.previous_time_code_ms = time_code_ms
+            self.counters.add((self.playback_loops, counter))
+            return
+        key = (self.playback_loops, counter)
+        already_seen = key in self.counters
+        self.counters.add(key)
 
         # Gaps are measured against the highest counter seen, not the previous
         # datagram: otherwise 1,2,4,3,5 would count the 3 as both a drop
@@ -96,6 +113,7 @@ class _PacketSeries:
             "loss_fraction": loss_fraction,
             "duplicate_frames": self.duplicates,
             "out_of_order_frames": self.out_of_order,
+            "playback_loops": self.playback_loops,
             "character_ids": sorted(self.character_ids),
         }
 
@@ -275,6 +293,11 @@ class XsensStreamAcceptance:
         elif not self.joints.valid:
             warnings.append("no MXTP20 joint-angle packets observed")
 
+        if body["playback_loops"]:
+            warnings.append(
+                f"MVN playback looped {body['playback_loops']} time(s): a recorded take, not the live "
+                "suit (counters restarted; each pass was checked on its own)"
+            )
         if body["duplicate_frames"]:
             warnings.append(f"observed {body['duplicate_frames']} duplicate body counters")
         if joints["duplicate_frames"]:
