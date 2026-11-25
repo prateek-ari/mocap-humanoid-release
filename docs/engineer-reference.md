@@ -79,6 +79,8 @@ export LINUX_XSENS_IP='<Linux ip -br -4 address>'
 export XSENS_SOURCE_IP="$WINDOWS_XSENS_IP"
 export XSENS_UDP_PORT=5555
 export ROBOT='booster_k1'
+# Xsens MVN on this PC (Network Streamer destination 127.0.0.1:5555):
+#   WINDOWS_XSENS_IP=127.0.0.1, LINUX_XSENS_IP='' (no firewall rule needed)
 export IK_CONFIG="$PWD/retarget_configs/bvh_xsens_to_booster_k1.json"
 mkdir -p "$SESSION_DIR"
 ```

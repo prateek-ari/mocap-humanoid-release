@@ -1141,8 +1141,7 @@ class SetupWorkbench:
             raise _invalid("Neutral pose duration must be at least 0.01 s", "npose_duration_s")
         windows_ip = text("windows_xsens_ip", "Xsens PC IP" if self.windows else "Windows Xsens IP")
         if windows_ip and not (usable_ipv4(windows_ip) or self._same_pc(windows_ip)):
-            example = "127.0.0.1 (Xsens on this PC) or " if self.windows else ""
-            raise _invalid(f"Enter an IPv4 address such as {example}192.168.1.246",
+            raise _invalid("Enter an IPv4 address such as 127.0.0.1 (Xsens on this PC) or 192.168.1.246",
                            "windows_xsens_ip")
         linux_ip = text("linux_xsens_ip", "This PC's IP" if self.windows else "Linux Xsens IP")
         if linux_ip and not usable_ipv4(linux_ip):
@@ -1173,9 +1172,9 @@ class SetupWorkbench:
         }
 
     def _same_pc(self, source_ip: str) -> bool:
-        """Whether ``source_ip`` means Xsens streams from this PC (Windows installs only)."""
+        """Whether ``source_ip`` means Xsens streams from this PC (MVN on Windows or Ubuntu)."""
 
-        return self.windows and source_ip == LOOPBACK_SOURCE
+        return source_ip == LOOPBACK_SOURCE
 
     def _session_dir_allowed(self, session_dir: str) -> bool:
         """Whether ``session_dir`` resolves inside home and outside the checkout."""
@@ -1652,7 +1651,8 @@ class SetupWorkbench:
         if kind in ("acceptance", "live", "compare") and not session["windows_xsens_ip"]:
             raise SetupError(
                 "Choose where Xsens runs (this PC or its IP) in the session first"
-                if self.windows else "Enter the Windows Xsens IP in the session first",
+                if self.windows else
+                "Enter the Windows Xsens IP (127.0.0.1 when Xsens runs on this PC) in the session first",
                 code="missing_windows_ip",
             )
         needs_runtime = kind in ("retarget", "render") or (

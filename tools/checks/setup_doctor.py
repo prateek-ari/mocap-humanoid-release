@@ -420,12 +420,14 @@ def _live_checks(env: dict[str, str]) -> list[dict[str, str]]:
     source = env.get("XSENS_SOURCE_IP", "")
     try:
         address = ipaddress.IPv4Address(source)
-        valid_source = not (address.is_unspecified or address.is_loopback or address.is_multicast)
+        valid_source = not (address.is_unspecified or address.is_multicast)
     except ipaddress.AddressValueError:
         valid_source = False
+    same_pc = valid_source and address.is_loopback
     checks.append(_check("source_ipv4", "pass" if valid_source else "block",
-                         source if valid_source else "XSENS_SOURCE_IP must be a usable Windows Xsens-facing IPv4",
-                         "export XSENS_SOURCE_IP=<Windows Xsens-facing IPv4 from ipconfig>"))
+                         (f"{source} (Xsens streams from this PC)" if same_pc else source) if valid_source
+                         else "XSENS_SOURCE_IP must be a usable Windows Xsens-facing IPv4, or 127.0.0.1 for this PC",
+                         "export XSENS_SOURCE_IP=<Windows Xsens-facing IPv4 from ipconfig, or 127.0.0.1 for this PC>"))
     raw_port = env.get("XSENS_UDP_PORT", "5555")
     try:
         port = int(raw_port)

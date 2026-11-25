@@ -159,7 +159,9 @@ hoist.
    **Mocap Update**: time, PASS or FAIL, old commit -> new commit). A failed update is shown in
    red with what to do. To update, see step 11 below.
 2. **Session.** Step 03: robot **Booster K1**, the performer's height, **Windows Xsens IP** = the
-   address of the PC that runs Xsens (MVN). **Save session**.
+   address of the PC that runs Xsens (MVN). When MVN runs on this laptop, choose **Xsens MVN runs
+   on: This PC** instead (saved as `127.0.0.1`, no Linux IP) and set MVN's Network Streamer to
+   `127.0.0.1`, port 5555. **Save session**.
 3. **Where the Xsens data comes from.** Start streaming in Xsens to this PC, port 5555. Steps
    **06** and **07** show one line about the sender:
    - green: data arrives from the address in the session. Good.

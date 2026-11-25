@@ -98,7 +98,8 @@ Run stages sequentially; every stage binds the same UDP port.
               calibration)
 
 Environment:
-  XSENS_SOURCE_IP=<current Windows Xsens-facing IPv4> (required for acceptance/GMR)
+  XSENS_SOURCE_IP=<current Windows Xsens-facing IPv4, or 127.0.0.1 when Xsens runs on this PC>
+                  (required for acceptance/GMR)
   XSENS_UDP_PORT=5555
   XSENS_DURATION_S=30
 EOF

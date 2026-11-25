@@ -202,7 +202,7 @@ function toDraft(values: SessionValues, home: string | null): Draft {
   ])) as Draft
 }
 
-/** Windows: where Xsens Humanoid runs, from the draft's source IP (or the console's hint while it is empty). */
+/** Where Xsens runs (this PC or another), from the draft's source IP (or the console's hint while it is empty). */
 function xsensHostOf(setup: SetupState, draft: Draft): XsensHost {
   const ip = draft.windows_xsens_ip.trim()
   return (ip ? isLoopbackIp(ip) : setup.xsens_on_this_pc) ? 'this' : 'other'
@@ -211,7 +211,7 @@ function xsensHostOf(setup: SetupState, draft: Draft): XsensHost {
 function initialDraft(setup: SetupState, route: SetupRoute | null): Draft {
   const draft = toDraft(setup.session ?? setup.defaults, setup.home)
   if (route) draft.route = route
-  if (setup.platform === 'windows' && xsensHostOf(setup, draft) === 'this') {
+  if (xsensHostOf(setup, draft) === 'this') {
     // Same PC: the source is loopback and there is no receiver IP to choose.
     draft.windows_xsens_ip = LOOPBACK_IP
     draft.linux_xsens_ip = ''
@@ -556,6 +556,7 @@ export function SetupView({ client, initial, hidden = false }: SetupViewProps) {
   }, [client])
 
   const windows = setup.platform === 'windows'
+  const xsensApp = windows ? 'Xsens Humanoid' : 'Xsens MVN'
   const route: SetupRoute = draft.route === 'recorded' ? 'recorded' : 'live'
   const steps = stepsForRoute(route, setup.desktop_tools)
   const jobs = mergeJobs(setup.jobs, logs, lostJobs)
@@ -691,10 +692,12 @@ export function SetupView({ client, initial, hidden = false }: SetupViewProps) {
     setUsingSender(true)
     setSenderNotice(null)
     try {
-      const next = await client.saveSession({ ...session, windows_xsens_ip: address })
+      const linuxIp = isLoopbackIp(address) ? '' : session.linux_xsens_ip
+      const next = await client.saveSession({ ...session, windows_xsens_ip: address, linux_xsens_ip: linuxIp })
       if (!aliveRef.current) return
       setSetup(next)
-      setDraft((current) => ({ ...current, windows_xsens_ip: address }))
+      setDraft((current) => ({ ...current, windows_xsens_ip: address, linux_xsens_ip: linuxIp }))
+      setXsensHost(isLoopbackIp(address) ? 'this' : 'other')
       setSenderNotice({ error: false, message: `Saved: the session now takes Xsens data from ${address}. A running live simulation keeps the old address: stop it and start it again. This does not fix network routing or a firewall.` })
     } catch (reason) {
       if (aliveRef.current) setSenderNotice({ error: true, message: errorMessage(reason, 'The address was not saved.') })
@@ -848,7 +851,7 @@ export function SetupView({ client, initial, hidden = false }: SetupViewProps) {
     if (fieldErrors[field]) setFieldErrors((current) => ({ ...current, [field]: undefined }))
   }
 
-  /** Windows: choose where Xsens Humanoid runs and set the two IP fields to match. */
+  /** Choose where Xsens runs and set the two IP fields to match. */
   function selectXsensHost(next: XsensHost) {
     setXsensHost(next)
     setSavedNotice(null)
@@ -877,7 +880,7 @@ export function SetupView({ client, initial, hidden = false }: SetupViewProps) {
       if (!aliveRef.current) return
       setSetup(next)
       setDraft(next.session ? toDraft(next.session, next.home) : draft)
-      if (next.session && next.platform === 'windows') setXsensHost(xsensHostOf(next, toDraft(next.session, next.home)))
+      if (next.session) setXsensHost(xsensHostOf(next, toDraft(next.session, next.home)))
       setSavedNotice(`Saved ${tildePath((next.session ?? values).session_dir, next.home)}/session.env`)
     } catch (reason) {
       if (!aliveRef.current) return
@@ -1118,11 +1121,10 @@ export function SetupView({ client, initial, hidden = false }: SetupViewProps) {
           </fieldset>
 
           {route === 'live' ? (
-            windows ? (
               <fieldset className="group">
                 <legend className="silk">Network · live route</legend>
-                <div className="units" role="radiogroup" aria-label="Xsens Humanoid runs on">
-                  <span className="silk">Xsens Humanoid runs on</span>
+                <div className="units" role="radiogroup" aria-label={`${xsensApp} runs on`}>
+                  <span className="silk">{xsensApp} runs on</span>
                   {([{ value: 'this', label: 'This PC' }, { value: 'other', label: 'Another PC' }] as const).map((option) => (
                     <label key={option.value} className={xsensHost === option.value ? 'selected' : ''}>
                       <input type="radio" name="setup-xsens-host" value={option.value} checked={xsensHost === option.value} onChange={() => selectXsensHost(option.value)} />
@@ -1131,8 +1133,8 @@ export function SetupView({ client, initial, hidden = false }: SetupViewProps) {
                   ))}
                 </div>
                 {xsensHost === 'this' ? (
-                  <p className="group-note">In Xsens Humanoid set Network Streamer destination <code>{LOOPBACK_IP}</code>, port <code>{STREAM_PORT}</code>.</p>
-                ) : (
+                  <p className="group-note">In {xsensApp} set Network Streamer destination <code>{LOOPBACK_IP}</code>, port <code>{STREAM_PORT}</code>.</p>
+                ) : windows ? (
                   <>
                     <div className="form-grid">
                       {field('windows_xsens_ip', 'Xsens PC IP', textInput('windows_xsens_ip', { mono: true, placeholder: 'e.g. 192.168.1.246' }))}
@@ -1140,21 +1142,21 @@ export function SetupView({ client, initial, hidden = false }: SetupViewProps) {
                     </div>
                     <p className="group-note">Run <code>ipconfig</code> on each PC: use the IPv4 address of the adapter on the network both PCs share. Both may stay empty until you know them.</p>
                   </>
+                ) : (
+                  <>
+                    <div className="form-grid">
+                      {field('windows_xsens_ip', 'Windows Xsens IP', textInput('windows_xsens_ip', { mono: true, placeholder: 'e.g. 192.168.1.246' }))}
+                      {field('linux_xsens_ip', 'Linux Xsens IP', ipSelect)}
+                    </div>
+                    <p className="group-note">Windows IP: run <code>ipconfig</code> on Windows and use the Xsens Ethernet adapter. Linux IP: the adapter on the Xsens router. Both may stay empty until you know them.</p>
+                  </>
                 )}
-                <div className="form-grid wide-fields">
-                  {field('mocap_ws', 'Runtime folder', textInput('mocap_ws', { mono: true, placeholder: '~/mocap-runtime' }))}
-                </div>
+                {windows && (
+                  <div className="form-grid wide-fields">
+                    {field('mocap_ws', 'Runtime folder', textInput('mocap_ws', { mono: true, placeholder: '~/mocap-runtime' }))}
+                  </div>
+                )}
               </fieldset>
-            ) : (
-            <fieldset className="group">
-              <legend className="silk">Network · live route</legend>
-              <div className="form-grid">
-                {field('windows_xsens_ip', 'Windows Xsens IP', textInput('windows_xsens_ip', { mono: true, placeholder: 'e.g. 192.168.1.246' }))}
-                {field('linux_xsens_ip', 'Linux Xsens IP', ipSelect)}
-              </div>
-              <p className="group-note">Windows IP: run <code>ipconfig</code> on Windows and use the Xsens Ethernet adapter. Linux IP: the adapter on the Xsens router. Both may stay empty until you know them.</p>
-            </fieldset>
-            )
           ) : (
             <fieldset className="group">
               <legend className="silk">Recorded files</legend>
@@ -1244,7 +1246,7 @@ export function SetupView({ client, initial, hidden = false }: SetupViewProps) {
   }
 
   function renderWindows() {
-    const onThisPc = windows && (session && session.windows_xsens_ip ? isLoopbackIp(session.windows_xsens_ip) : xsensHost === 'this')
+    const onThisPc = session && session.windows_xsens_ip ? isLoopbackIp(session.windows_xsens_ip) : xsensHost === 'this'
     const linuxIp = onThisPc ? LOOPBACK_IP : session?.linux_xsens_ip ?? ''
     const destinationLabel = windows ? "This PC's IP" : 'Linux Xsens IP'
     return (
@@ -1293,7 +1295,9 @@ export function SetupView({ client, initial, hidden = false }: SetupViewProps) {
           <Lamp state="next" />
           <div>
             <span className="silk">Linux firewall</span>
-            {setup.firewall_command ? (
+            {onThisPc ? (
+              <p>Streaming to {LOOPBACK_IP} stays on this PC, so no firewall change is needed.</p>
+            ) : setup.firewall_command ? (
               <>
                 <p>{FIREWALL_NOTE[setup.firewall_state ?? 'unknown']}</p>
                 {setup.desktop_tools && (setup.firewall_state === 'active' || setup.firewall_state === 'unknown') && (
@@ -1403,15 +1407,15 @@ export function SetupView({ client, initial, hidden = false }: SetupViewProps) {
   }
 
   function renderStream() {
-    // Same PC on Windows: the receiver is reached through loopback.
-    const receiverIp = session?.linux_xsens_ip || (windows && session && isLoopbackIp(session.windows_xsens_ip) ? LOOPBACK_IP : '')
+    // Same PC: the receiver is reached through loopback.
+    const receiverIp = session?.linux_xsens_ip || (session && isLoopbackIp(session.windows_xsens_ip) ? LOOPBACK_IP : '')
     return (
       <>
         <fieldset className="group">
           <legend className="silk">30-second stream check</legend>
           <div className="plate-row">
-            <ValuePlate label={windows ? 'From Xsens' : 'From Windows'} value={session?.windows_xsens_ip ?? ''} copy={false} />
-            <ValuePlate label={windows ? 'To this PC' : 'To Linux'} value={receiverIp ? `${receiverIp}:${STREAM_PORT}` : ''} copy={false} />
+            <ValuePlate label={windows || receiverIp === LOOPBACK_IP ? 'From Xsens' : 'From Windows'} value={session?.windows_xsens_ip ?? ''} copy={false} />
+            <ValuePlate label={windows || receiverIp === LOOPBACK_IP ? 'To this PC' : 'To Linux'} value={receiverIp ? `${receiverIp}:${STREAM_PORT}` : ''} copy={false} />
           </div>
           {senderPanel()}
           <div className="setup-actions">

@@ -82,7 +82,7 @@ Each take or test gets its own session folder. In the Setup console, pick **Live
 1. Choose the robot: **Booster K1** (the default), **Unitree G1** or **Booster T1**.
 2. Enter the **measured** performer height in metres.
 3. Keep the suggested session folder (a new dated folder under `~/mocap-sessions`), or type another one inside your home folder.
-4. **Live:** type the **Windows Xsens IP** (run `ipconfig` on Windows and read the Xsens Ethernet adapter), then choose the **Linux Xsens IP**: the address marked *(detected)* is the adapter on the Xsens router. Both can stay empty until you know them.
+4. **Live:** under **Xsens MVN runs on**, choose **This PC** when Xsens MVN runs on this Ubuntu PC: the console saves `127.0.0.1` and needs no other address. For **Another PC**, type the **Windows Xsens IP** (run `ipconfig` on Windows and read the Xsens Ethernet adapter), then choose the **Linux Xsens IP**: the address marked *(detected)* is the adapter on the Xsens router. Both can stay empty until you know them.
 5. **Recorded:** check the runtime folder and the two BVH paths (you copy the files there in step 08) and choose the BVH units (centimetres is the Xsens default). Open **Frames and neutral window** only if your take needs other frames.
 6. Click **Save session**. The console shows `Saved ~/mocap-sessions/…/session.env`.
 7. Click **Run system check** and wait for **PASS**. If it shows FAIL, read the lines marked `FAIL` and see step 12.
@@ -120,6 +120,8 @@ More detail: [Windows setup](windows-xsens-humanoid-setup.md).
 ## 05 · Connect Xsens streaming
 
 Live route. Both PCs must be on the Xsens router by Ethernet, and step 03 must contain both IP addresses.
+
+**Xsens MVN on this Ubuntu PC** (step 03: **This PC**). In MVN open **Options → Network Streamer** and set destination `127.0.0.1`, port **5555**, UDP, with the streams in the list below. Turn off any other destination for port 5555. The data stays on this PC: no router, no IP addresses and no firewall rule are needed. Then go to step 06.
 
 In the Setup console, open **04–05 Windows: suit and streaming**. It shows the exact values to type on Windows, each with a **Copy** button:
 

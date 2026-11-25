@@ -194,13 +194,13 @@ Neutral pose: from ${npose_start} s for ${npose_duration} s. (check this window 
     [[ -z $offsets ]] || offsets=$(absolute "$offsets")
   fi
 else
-  step 'Network. On Windows, run ipconfig and read the IPv4 of the adapter on the Xsens router.'
+  step 'Network. Xsens MVN on this PC: enter 127.0.0.1. On a Windows PC: run ipconfig and read the IPv4 of the adapter on the Xsens router.'
   while true; do
-    ask windows_ip 'Windows Xsens IP (Enter to skip until you know it)' "${windows_ip:-skip}"
+    ask windows_ip 'Xsens IP (127.0.0.1 = this PC; Enter to skip until you know it)' "${windows_ip:-skip}"
     [[ $windows_ip != skip ]] || { windows_ip=''; break; }
-    ipv4 "$windows_ip" && break
+    { ipv4 "$windows_ip" || [[ $windows_ip == 127.0.0.1 ]]; } && break
     (( ! defaults )) || die "invalid Windows IP: $windows_ip"
-    printf '  Enter an IPv4 address such as 192.168.1.246.\n'
+    printf '  Enter an IPv4 address such as 127.0.0.1 (this PC) or 192.168.1.246.\n'
   done
   detected=''
   if [[ -n $windows_ip ]] && command -v ip >/dev/null 2>&1; then
@@ -210,7 +210,9 @@ else
     printf 'This PC'"'"'s addresses:\n'
     ip -br -4 address | awk '$1 != "lo" { print "  " $1 "  " $3 }' || true
   fi
-  while true; do
+  # Same PC: MVN streams to 127.0.0.1, there is no receiver IP to choose.
+  [[ $windows_ip != 127.0.0.1 ]] || { linux_ip=''; detected=''; }
+  while [[ $windows_ip != 127.0.0.1 ]]; do
     ask linux_ip 'Linux Xsens IP (enter it in Xsens Network Streamer)' "${detected:-${linux_ip:-skip}}"
     [[ $linux_ip != skip ]] || { linux_ip=''; break; }
     ipv4 "$linux_ip" && [[ $linux_ip != "$windows_ip" ]] && break
@@ -252,8 +254,12 @@ if [[ $route == recorded ]]; then
   printf ' · motion %s\n' "$(tilde "$motion")"
   [[ -f $motion ]] || printf '  Note: the motion BVH is not there yet; copy it before retargeting.\n'
 else
-  printf ' · Windows %s -> Linux %s, UDP 5555\n' "${windows_ip:-not set}" "${linux_ip:-not set}"
-  [[ -n $windows_ip && -n $linux_ip ]] ||
+  if [[ $windows_ip == 127.0.0.1 ]]; then
+    printf ' · Xsens on this PC -> 127.0.0.1, UDP 5555\n'
+  else
+    printf ' · Windows %s -> Linux %s, UDP 5555\n' "${windows_ip:-not set}" "${linux_ip:-not set}"
+  fi
+  [[ $windows_ip == 127.0.0.1 || ( -n $windows_ip && -n $linux_ip ) ]] ||
     printf '  Note: rerun this script once both IP addresses are known.\n'
 fi
 printf '\nLoad it in every new terminal (from %s):\n  source session.env\n' "$(tilde "$repo_root")"

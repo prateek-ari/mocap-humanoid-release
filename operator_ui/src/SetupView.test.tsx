@@ -518,6 +518,28 @@ describe('Setup on Linux without platform fields', () => {
     expect(screen.getByText('From Windows')).toBeTruthy()
     expect(screen.getByText('To Linux')).toBeTruthy()
   })
+
+  it('runs Xsens MVN on this Ubuntu PC: 127.0.0.1, no receiver IP, no firewall rule', async () => {
+    window.history.replaceState(null, '', '#setup/session')
+    const setupClient = await renderApp(makeSetup({ session: values }))
+    expect(screen.getByRole('radio', { name: 'Another PC' })).toHaveProperty('checked', true)
+    fireEvent.click(screen.getByRole('radio', { name: 'This PC' }))
+    expect(screen.queryByLabelText('Windows Xsens IP')).toBeNull()
+    expect(screen.queryByLabelText('Linux Xsens IP')).toBeNull()
+    expect(screen.getByText(/Network Streamer destination/).textContent).toContain('In Xsens MVN set Network Streamer destination 127.0.0.1')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Save session' }))
+    await flush()
+    expect(setupClient.saves).toHaveBeenLastCalledWith(
+      expect.objectContaining({ windows_xsens_ip: '127.0.0.1', linux_xsens_ip: '' }), false)
+
+    openStep('windows')
+    expect(screen.getByText('Streaming to 127.0.0.1 stays on this PC, so no firewall change is needed.')).toBeTruthy()
+    expect(screen.queryByText(/sudo ufw allow/)).toBeNull()
+    openStep('stream')
+    expect(screen.getByText('127.0.0.1:5555')).toBeTruthy()
+    expect(screen.getByText('To this PC')).toBeTruthy()
+  })
 })
 
 describe('Setup on Windows', () => {
@@ -971,6 +993,13 @@ describe('Live K1 helpers (plan C1, C2, C3)', () => {
     expect(setupClient.saves).toHaveBeenCalledWith({ ...values, windows_xsens_ip: '192.168.88.11' }, false)
     expect(senderText()).toContain('stop it and start it again')
     expect(senderText()).toContain('does not fix network routing or a firewall')
+  })
+
+  it('saves a sender on this PC (127.0.0.1) with an empty Linux IP', async () => {
+    const setupClient = await openStream(stream({ senders: ['127.0.0.1'], source: '127.0.0.1:50000', body_frames: 300 }))
+    fireEvent.click(screen.getByRole('button', { name: 'Use 127.0.0.1' }))
+    await flush()
+    expect(setupClient.saves).toHaveBeenCalledWith({ ...values, windows_xsens_ip: '127.0.0.1', linux_xsens_ip: '' }, false)
   })
 
   it('shows the configured sender, two senders, stale and no data without a button', async () => {
