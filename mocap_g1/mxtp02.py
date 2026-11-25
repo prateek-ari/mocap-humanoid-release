@@ -214,10 +214,13 @@ def parse_body_datagram(data: bytes, *, strict: bool = True) -> BodyDatagram:
         raise ProtocolError(f"unexpected message id {message_id!r}")
     if strict and datagram_counter != DATAGRAM_COUNTER_SINGLE:
         raise ProtocolError("interleaved/multipart MXTP02 datagrams are not accepted")
-    if strict and (item_count != len(XSENS_SEGMENTS) or body_count != len(XSENS_SEGMENTS)):
+    # MVN sends the 23 body segments first, then props and fingers (MVN 2026.9 with
+    # "Send finger data": 23 + 40 records). Only the body is used; the rest is skipped.
+    if strict and (body_count != len(XSENS_SEGMENTS)
+                   or item_count != body_count + prop_count + finger_count):
         raise ProtocolError("expected one complete 23-segment body frame")
-    if strict and (prop_count or finger_count or reserved):
-        raise ProtocolError("body-only stream unexpectedly contains props, fingers, or reserved data")
+    if strict and reserved:
+        raise ProtocolError("body datagram has non-zero reserved header data")
     expected_payload = item_count * SEGMENT_STRUCT.size
     if payload_size != expected_payload:
         raise ProtocolError(
@@ -231,7 +234,7 @@ def parse_body_datagram(data: bytes, *, strict: bool = True) -> BodyDatagram:
 
     segments: dict[str, SegmentPose] = {}
     offset = HEADER_STRUCT.size
-    for _ in range(item_count):
+    for _ in range(min(item_count, len(XSENS_SEGMENTS))):
         segment_id, x, y, z, qw, qx, qy, qz = SEGMENT_STRUCT.unpack_from(data, offset)
         offset += SEGMENT_STRUCT.size
         if not 1 <= segment_id <= len(XSENS_SEGMENTS):

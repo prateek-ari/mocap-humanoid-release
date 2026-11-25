@@ -103,9 +103,8 @@ class _PacketSeries:
 class XsensStreamAcceptance:
     """Accumulate and grade the body-only MXTP02 plus MXTP20 stream we consume.
 
-    The strict body parser deliberately rejects prop/finger records. This makes a
-    misconfigured Network Streamer visible before the stream reaches GMR, whose
-    direct path expects one complete 23-segment body frame.
+    The strict body parser takes the 23 body segments and skips any prop/finger
+    records after them, so GMR always gets one complete 23-segment body frame.
     """
 
     def __init__(
